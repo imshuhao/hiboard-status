@@ -47,7 +47,7 @@
 
 ```json
 {
-  "name": "hiboard-status",
+  "name": "imshuhao",
   "owner": { "name": "imshuhao" },
   "plugins": [
     {
@@ -1173,7 +1173,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/hiboard_hook.py" --test-push
 
 ```
 /plugin marketplace add imshuhao/hiboard-status
-/plugin install hiboard-status@hiboard-status
+/plugin install hiboard-status@imshuhao
 ```
 
 装好后运行 `/hiboard-status:setup`，按引导获取授权码并完成配置。
@@ -1256,7 +1256,7 @@ Expected: grep 输出 `2`（SessionStart 与 Stop 各推一次）
 
 ```
 /plugin marketplace add /Users/shuhao/Codebase/projects/hiboard-status
-/plugin install hiboard-status@hiboard-status
+/plugin install hiboard-status@imshuhao
 ```
 
 Expected: 安装成功，`/hooks` 中可见 5 个事件挂载

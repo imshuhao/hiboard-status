@@ -189,7 +189,7 @@ hiboard-status/                      # GitHub 仓库 = 插件 = marketplace
 
 ```
 /plugin marketplace add imshuhao/hiboard-status
-/plugin install hiboard-status@hiboard-status
+/plugin install hiboard-status@imshuhao
 ```
 
 README 必须包含：华为手机硬件门槛（第一行）、安装两条命令、授权码获取流程、

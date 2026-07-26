@@ -23,7 +23,7 @@
 
 ```
 /plugin marketplace add imshuhao/hiboard-status
-/plugin install hiboard-status@hiboard-status
+/plugin install hiboard-status@imshuhao
 ```
 
 装好后运行 `/hiboard-status:setup`，按引导获取授权码并完成配置。
