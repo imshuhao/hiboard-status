@@ -65,3 +65,36 @@ def effective_status(entry: dict, now=None) -> str:
     if st in ("running", "waiting") and now - entry.get("updated_at", 0) > STALE_SECS:
         return "stale"
     return st
+
+
+# ---------------------------------------------------------------- 渲染
+
+def render_content(state: dict, now=None) -> str:
+    now = time.time() if now is None else now
+    items = sorted(state.get("projects", {}).items(),
+                   key=lambda kv: kv[1].get("updated_at", 0), reverse=True)
+    sections = []
+    for name, e in items:
+        st = effective_status(e, now)
+        emoji, label = STATUS_META[st]
+        body = truncate_utf16(e.get("summary") or e.get("prompt") or "",
+                              MAX_PROJECT_UTF16)
+        ts = fmt_time(e.get("updated_at", now), now=now)
+        sections.append(f"## {emoji} {name} — {label}\n`{ts}` {body}".rstrip())
+    content = "\n\n---\n\n".join(sections) or "_暂无会话_"
+    return truncate_utf16(content, MAX_CARD_UTF16)
+
+
+def render_summary(state: dict, now=None) -> str:
+    """列表态卡片标题（上游字段名 summary，见 API 契约 §6.2）。"""
+    now = time.time() if now is None else now
+    projects = state.get("projects", {})
+    if not projects:
+        return "Claude Code"
+    running = sum(1 for e in projects.values()
+                  if effective_status(e, now) == "running")
+    name, latest = max(projects.items(),
+                       key=lambda kv: kv[1].get("updated_at", 0))
+    _, label = STATUS_META[effective_status(latest, now)]
+    parts = ([f"{running} 个会话运行中"] if running else []) + [f"{name} {label}"]
+    return truncate_utf16(" · ".join(parts), 60)
