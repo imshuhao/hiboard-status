@@ -254,7 +254,7 @@ def push_card(cfg: dict, summary: str, content: str, *,
         data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
         headers={
             "Content-Type": "application/json; charset=utf-8",
-            "User-Agent":   "hiboard-status/0.1",
+            "User-Agent":   "hiboard-status/0.2.1",
             "x-trace-id":   f"ccs-{now}-{uuid.uuid4().hex[:8]}",  # 必需，非空即可
         })
     try:
