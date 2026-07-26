@@ -132,5 +132,64 @@ class TestState(TmpDataDirTest):
         self.assertEqual(on_disk["projects"]["demo"]["status"], "running")
 
 
+def _write_config(**over):
+    cfg = {"authCode": "TESTCODE12345", "enabled": True}
+    cfg.update(over)
+    hh.data_dir().mkdir(parents=True, exist_ok=True)
+    hh.config_path().write_text(json.dumps(cfg), encoding="utf-8")
+
+
+class TestConfigAndPush(TmpDataDirTest):
+    def setUp(self):
+        super().setUp()
+        os.environ["HIBOARD_DRY_RUN"] = "1"
+
+    def tearDown(self):
+        os.environ.pop("HIBOARD_DRY_RUN", None)
+        super().tearDown()
+
+    def test_load_config_missing_file(self):
+        self.assertIsNone(hh.load_config())
+
+    def test_load_config_disabled(self):
+        _write_config(enabled=False)
+        self.assertIsNone(hh.load_config())
+
+    def test_load_config_no_authcode(self):
+        _write_config(authCode="")
+        self.assertIsNone(hh.load_config())
+
+    def test_load_config_ok(self):
+        _write_config()
+        self.assertEqual(hh.load_config()["authCode"], "TESTCODE12345")
+
+    def test_push_card_dry_run_logs_payload(self):
+        _write_config()
+        ok = hh.push_card(hh.load_config(), "标题", "# 正文")
+        self.assertTrue(ok)
+        logtext = hh.log_path().read_text(encoding="utf-8")
+        self.assertIn("DRY_RUN", logtext)
+        self.assertIn(hh.CARD_ID, logtext)
+        self.assertIn('"data"', logtext)  # 外层 data 包装存在
+
+    def test_do_push_without_config_is_noop(self):
+        state = hh.update_project("p", {"status": "running",
+                                        "updated_at": time.time()})
+        hh.do_push(state)  # 不应抛异常
+        self.assertFalse(hh.log_path().exists()
+                         and "DRY_RUN" in hh.log_path().read_text(encoding="utf-8"))
+
+    def test_do_push_dedupes_identical_content(self):
+        _write_config()
+        # updated_at 需为近期值，否则会被 7 天清理逻辑移除（同 Task 4 调整）
+        state = hh.update_project("p", {"status": "done", "summary": "x",
+                                        "updated_at": time.time()})
+        hh.do_push(state)
+        state = json.loads(hh.state_path().read_text(encoding="utf-8"))
+        hh.do_push(state)  # 内容未变，应跳过
+        logtext = hh.log_path().read_text(encoding="utf-8")
+        self.assertEqual(logtext.count("DRY_RUN"), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

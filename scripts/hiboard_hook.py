@@ -167,3 +167,90 @@ def update_project(proj: str, fields: dict) -> dict:
     def m(state):
         state["projects"].setdefault(proj, {}).update(fields)
     return mutate_state(m)
+
+
+# ---------------------------------------------------------------- 配置与推送
+
+ERR_HINTS = {
+    "0000900034": "授权码无效或未关联，请到负一屏重新获取",
+    "0000500001": "缺少 x-trace-id header",
+    "0000500002": "正文超过 30720 个 UTF-16 码元",
+}
+CP_HINTS = {
+    "82600017": "设备未联网或未登录华为账号",
+    "82600013": "负一屏「服务动态」推送开关已关闭",
+    "82600005": "服务动态云服务异常，请稍后重试",
+}
+
+
+def load_config():
+    try:
+        cfg = json.loads(config_path().read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(cfg, dict) or not cfg.get("enabled", True):
+        return None
+    if not cfg.get("authCode"):
+        return None
+    return cfg
+
+
+def push_card(cfg: dict, summary: str, content: str) -> bool:
+    now = int(time.time())
+    body = {"data": {
+        "authCode": cfg["authCode"],
+        "msgContent": [{
+            "msgId":            f"{CARD_ID}_{now}_{uuid.uuid4().hex[:6]}",
+            "scheduleTaskId":   CARD_ID,
+            "scheduleTaskName": "Claude Code Status",  # 必填但不显示（契约 §6.2）
+            "summary":          summary,               # 列表态卡片标题
+            "result":           f"最后更新 {datetime.now():%H:%M}",
+            "content":          content,
+            "source":           "Claude Code",         # 展开态主标题
+            "taskFinishTime":   now,
+        }],
+    }}
+    if os.environ.get("HIBOARD_DRY_RUN"):
+        log("DRY_RUN " + json.dumps(body, ensure_ascii=False)[:800])
+        return True
+
+    req = urllib.request.Request(
+        cfg.get("pushServiceUrl", DEFAULT_ENDPOINT), method="POST",
+        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json; charset=utf-8",
+            "User-Agent":   "hiboard-status/0.1",
+            "x-trace-id":   f"ccs-{now}-{uuid.uuid4().hex[:8]}",  # 必需，非空即可
+        })
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except Exception as e:
+        log(f"PUSH_FAIL {type(e).__name__}: {e}")
+        return False
+
+    code = str(data.get("code", ""))
+    if code == "0000000000":
+        return True
+    desc = data.get("desc") or data.get("message") or ""
+    hint = ERR_HINTS.get(code, "")
+    if code == "0200100004":
+        import re as _re
+        m = _re.search(r"Receive error code (\d+) from CP", desc)
+        if m:
+            hint = CP_HINTS.get(m.group(1), f"未知 CP 错误码 {m.group(1)}")
+    log(f"PUSH_FAIL {code} {desc}" + (f" — {hint}" if hint else ""))
+    return False
+
+
+def do_push(state: dict) -> None:
+    cfg = load_config()
+    if not cfg:
+        return
+    content = render_content(state)
+    summary = render_summary(state)
+    digest = hashlib.sha256(f"{summary}\n{content}".encode()).hexdigest()
+    if state.get("last_push_hash") == digest:
+        return
+    if push_card(cfg, summary, content):
+        mutate_state(lambda s: s.update({"last_push_hash": digest}))
