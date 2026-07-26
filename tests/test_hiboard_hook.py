@@ -191,5 +191,71 @@ class TestConfigAndPush(TmpDataDirTest):
         self.assertEqual(logtext.count("DRY_RUN"), 1)
 
 
+def _run_hook(evt: dict, extra_env=None) -> subprocess.CompletedProcess:
+    env = os.environ.copy()
+    env["HIBOARD_DRY_RUN"] = "1"
+    env["HIBOARD_NO_SUMMARY"] = "1"  # 分发测试不真起后台摘要进程
+    env.update(extra_env or {})
+    return subprocess.run(
+        [sys.executable, str(SCRIPTS / "hiboard_hook.py")],
+        input=json.dumps(evt), text=True, capture_output=True, env=env)
+
+
+class TestDispatch(TmpDataDirTest):
+    def _state(self):
+        return json.loads(hh.state_path().read_text(encoding="utf-8"))
+
+    def test_session_start_registers_running(self):
+        _write_config()
+        r = _run_hook({"hook_event_name": "SessionStart",
+                       "session_id": "s1", "cwd": "/tmp/myproj"})
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(self._state()["projects"]["myproj"]["status"], "running")
+
+    def test_user_prompt_truncates_and_sets_running(self):
+        _write_config()
+        _run_hook({"hook_event_name": "UserPromptSubmit", "session_id": "s1",
+                   "cwd": "/tmp/myproj", "prompt": "改" * 200})
+        e = self._state()["projects"]["myproj"]
+        self.assertEqual(e["status"], "running")
+        self.assertLessEqual(hh.utf16_len(e["prompt"]),
+                             hh.MAX_PROMPT_UTF16 + len("正在处理："))
+
+    def test_stop_sets_done_with_placeholder(self):
+        _write_config()
+        _run_hook({"hook_event_name": "Stop", "session_id": "s1",
+                   "cwd": "/tmp/myproj", "transcript_path": "/nonexistent"})
+        e = self._state()["projects"]["myproj"]
+        self.assertEqual(e["status"], "done")
+        self.assertIn("摘要生成中", e["summary"])
+
+    def test_notification_sets_waiting_keeps_prompt(self):
+        _write_config()
+        _run_hook({"hook_event_name": "UserPromptSubmit", "session_id": "s1",
+                   "cwd": "/tmp/myproj", "prompt": "跑测试"})
+        _run_hook({"hook_event_name": "Notification", "session_id": "s1",
+                   "cwd": "/tmp/myproj"})
+        e = self._state()["projects"]["myproj"]
+        self.assertEqual(e["status"], "waiting")
+        self.assertIn("跑测试", e["prompt"])  # Notification 不清空既有内容
+
+    def test_session_end_sets_ended(self):
+        _write_config()
+        _run_hook({"hook_event_name": "SessionEnd", "session_id": "s1",
+                   "cwd": "/tmp/myproj"})
+        self.assertEqual(self._state()["projects"]["myproj"]["status"], "ended")
+
+    def test_garbage_stdin_exits_zero(self):
+        env = os.environ.copy()
+        r = subprocess.run([sys.executable, str(SCRIPTS / "hiboard_hook.py")],
+                           input="not json", text=True,
+                           capture_output=True, env=env)
+        self.assertEqual(r.returncode, 0)
+
+    def test_unknown_event_exits_zero(self):
+        r = _run_hook({"hook_event_name": "SomethingNew", "cwd": "/tmp/x"})
+        self.assertEqual(r.returncode, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -254,3 +254,77 @@ def do_push(state: dict) -> None:
         return
     if push_card(cfg, summary, content):
         mutate_state(lambda s: s.update({"last_push_hash": digest}))
+
+
+# ---------------------------------------------------------------- 事件分发
+
+def project_name(cwd: str) -> str:
+    return Path(cwd).name or "unknown" if cwd else "unknown"
+
+
+def spawn_summarizer(evt: dict, proj: str) -> None:
+    if os.environ.get("HIBOARD_NO_SUMMARY"):
+        return
+    subprocess.Popen(
+        [sys.executable, os.path.abspath(__file__), "--summarize", proj,
+         evt.get("transcript_path", "") or ""],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True)
+
+
+def run_summarize(proj: str, transcript_path: str) -> None:
+    """Task 7 实现真实逻辑；当前占位保证 --summarize 不崩。"""
+    log(f"SUMMARIZE_STUB {proj}")
+
+
+def handle_event(evt: dict) -> None:
+    name = evt.get("hook_event_name", "")
+    proj = project_name(evt.get("cwd", ""))
+    now = time.time()
+    base = {"session_id": evt.get("session_id", ""),
+            "cwd": evt.get("cwd", ""), "updated_at": now}
+
+    if name == "SessionStart":
+        fields = dict(base, status="running", prompt="", summary="")
+    elif name == "UserPromptSubmit":
+        p = truncate_utf16(" ".join((evt.get("prompt") or "").split()),
+                           MAX_PROMPT_UTF16)
+        fields = dict(base, status="running", prompt=f"正在处理：{p}", summary="")
+    elif name == "Stop":
+        fields = dict(base, status="done", summary="（摘要生成中…）")
+    elif name == "Notification":
+        fields = dict(base, status="waiting")  # 不动 prompt/summary
+    elif name == "SessionEnd":
+        fields = dict(base, status="ended")
+    else:
+        return
+
+    state = update_project(proj, fields)
+    do_push(state)
+    if name == "Stop":
+        spawn_summarizer(evt, proj)
+
+
+def main(argv) -> int:
+    try:
+        if len(argv) >= 2 and argv[1] == "--summarize":
+            run_summarize(argv[2], argv[3] if len(argv) > 3 else "")
+        elif len(argv) >= 2 and argv[1] == "--test-push":
+            cfg = load_config()
+            if not cfg:
+                print("未找到有效配置：请先创建 ~/.claude/hiboard/config.json")
+                return 0
+            ok = push_card(cfg, "hiboard-status 配置成功 ✅",
+                           "# 配置成功\n\nClaude Code 会话状态将推送到这张卡片。")
+            print("推送成功，请到负一屏查看" if ok else
+                  f"推送失败，详见 {log_path()}")
+        else:
+            evt = json.load(sys.stdin)
+            handle_event(evt)
+    except Exception as e:
+        log(f"ERROR {type(e).__name__}: {e}")
+    return 0  # 恒 0：旁路系统绝不打断 Claude Code
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
