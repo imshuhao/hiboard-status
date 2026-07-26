@@ -1,0 +1,11 @@
+{
+  "name": "hiboard-status",
+  "owner": { "name": "imshuhao" },
+  "plugins": [
+    {
+      "name": "hiboard-status",
+      "source": "./",
+      "description": "把 Claude Code 会话状态与回合摘要推送到华为负一屏（HiBoard）聚合卡片"
+    }
+  ]
+}
