@@ -101,5 +101,36 @@ class TestRender(unittest.TestCase):
         self.assertEqual(hh.render_summary({"projects": {}}), "Claude Code")
 
 
+class TestState(TmpDataDirTest):
+    def test_update_project_creates_and_merges(self):
+        hh.update_project("demo", {"status": "running", "updated_at": time.time()})
+        state = hh.update_project("demo", {"status": "done"})
+        self.assertEqual(state["projects"]["demo"]["status"], "done")
+        self.assertIn("updated_at", state["projects"]["demo"])  # 旧字段保留
+
+    def test_corrupted_state_recovers_with_backup(self):
+        hh.data_dir().mkdir(parents=True, exist_ok=True)
+        hh.state_path().write_text("{not json", encoding="utf-8")
+        state = hh.update_project("demo", {"status": "running",
+                                           "updated_at": time.time()})
+        self.assertIn("demo", state["projects"])
+        self.assertTrue(hh.state_path().with_suffix(".json.bak").exists())
+
+    def test_prunes_entries_older_than_7_days(self):
+        old = time.time() - hh.PRUNE_SECS - 60
+        hh.update_project("ancient", {"status": "ended", "updated_at": old})
+        state = hh.update_project("fresh", {"status": "running",
+                                            "updated_at": time.time()})
+        self.assertNotIn("ancient", state["projects"])
+        self.assertIn("fresh", state["projects"])
+
+    def test_state_survives_roundtrip(self):
+        # updated_at 需为近期值，否则会被 7 天清理逻辑移除
+        hh.update_project("demo", {"status": "running",
+                                   "updated_at": time.time()})
+        on_disk = json.loads(hh.state_path().read_text(encoding="utf-8"))
+        self.assertEqual(on_disk["projects"]["demo"]["status"], "running")
+
+
 if __name__ == "__main__":
     unittest.main()

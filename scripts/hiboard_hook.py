@@ -98,3 +98,72 @@ def render_summary(state: dict, now=None) -> str:
     _, label = STATUS_META[effective_status(latest, now)]
     parts = ([f"{running} 个会话运行中"] if running else []) + [f"{name} {label}"]
     return truncate_utf16(" · ".join(parts), 60)
+
+
+# ---------------------------------------------------------------- 路径与日志
+
+def data_dir() -> Path:
+    return Path(os.environ.get("HIBOARD_DATA_DIR",
+                               str(Path.home() / ".claude" / "hiboard")))
+
+
+def state_path() -> Path:
+    return data_dir() / "state.json"
+
+
+def config_path() -> Path:
+    return data_dir() / "config.json"
+
+
+def log_path() -> Path:
+    return data_dir() / "push.log"
+
+
+def log(msg: str) -> None:
+    try:
+        data_dir().mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(log_path(), "a", encoding="utf-8") as f:
+            f.write(f"{stamp} {msg}\n")
+    except Exception:
+        pass  # 日志失败不影响任何流程
+
+
+# ---------------------------------------------------------------- 状态文件
+
+def mutate_state(mutator) -> dict:
+    """flock 串行化：加载 → mutator 就地修改 → 清理过期 → 原子写回。"""
+    data_dir().mkdir(parents=True, exist_ok=True)
+    with open(data_dir() / ".lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            try:
+                state = json.loads(state_path().read_text(encoding="utf-8"))
+                if not isinstance(state, dict):
+                    raise ValueError("state 不是对象")
+            except FileNotFoundError:
+                state = {}
+            except (ValueError, json.JSONDecodeError):
+                state_path().rename(state_path().with_suffix(".json.bak"))
+                log("WARN state.json 损坏，已备份并重建")
+                state = {}
+            state.setdefault("projects", {})
+            mutator(state)
+            now = time.time()
+            state["projects"] = {
+                n: e for n, e in state["projects"].items()
+                if now - e.get("updated_at", 0) <= PRUNE_SECS
+            }
+            tmp = state_path().with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2),
+                           encoding="utf-8")
+            tmp.rename(state_path())
+            return state
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def update_project(proj: str, fields: dict) -> dict:
+    def m(state):
+        state["projects"].setdefault(proj, {}).update(fields)
+    return mutate_state(m)
