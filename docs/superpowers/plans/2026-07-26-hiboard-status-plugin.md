@@ -15,7 +15,7 @@
 - 所有可见文本长度用 UTF-16 码元计（`utf16_len`），不用 `len()`——上游 API 按 UTF-16 码元限长 30,720
 - 卡片 ID 固定 `claude_code_status`；整卡 content ≤ 28,000 码元，单项目摘要 ≤ 3,000 码元
 - 用户数据目录 `~/.claude/hiboard/`，可用环境变量 `HIBOARD_DATA_DIR` 覆盖（测试用）
-- **真实授权码绝不进仓库**（开发期测试码 `<已作废>` 已泄露，文档示例一律用占位符）
+- **真实授权码绝不进仓库**（开发期使用的测试码已泄露作废，文档与测试一律用占位符 `TESTCODE12345`）
 - API 契约以 `docs/hiboard-api-spec.md` 为准（该文档为实测结论），字段显示映射反直觉：`summary`=列表标题、`source`=展开态主标题、`scheduleTaskName` 不显示但必填
 - 卡片 Markdown 禁用任务列表（`- [x]`）与表格对齐标记（渲染端不支持）
 
