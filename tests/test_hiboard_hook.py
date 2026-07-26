@@ -1,4 +1,4 @@
-import json, os, subprocess, sys, tempfile, time, unittest
+import json, os, re, subprocess, sys, tempfile, time, unittest
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
@@ -358,6 +358,139 @@ class TestSecurity(TmpDataDirTest):
     def test_truncate_zero_limit_returns_empty(self):
         self.assertEqual(hh.truncate_utf16("abcdef", 0), "")
         self.assertEqual(hh.truncate_utf16("abcdef", -1), "")
+
+
+class TestRecursionAndGating(TmpDataDirTest):
+    """摘要无头会话防递归 + 未配置零副作用。"""
+
+    def test_summarizing_env_suppresses_hook(self):
+        _write_config()
+        r = _run_hook({"hook_event_name": "SessionStart", "session_id": "s1",
+                       "cwd": "/tmp/myproj"},
+                      extra_env={"HIBOARD_SUMMARIZING": "1"})
+        self.assertEqual(r.returncode, 0)
+        self.assertFalse(hh.state_path().exists(),
+                         "递归守卫下不应有任何状态写入")
+
+    def test_unconfigured_hook_has_zero_side_effects(self):
+        # 不写 config —— 设计 §9：未配置时插件零副作用
+        r = _run_hook({"hook_event_name": "SessionStart", "session_id": "s1",
+                       "cwd": "/tmp/myproj"})
+        self.assertEqual(r.returncode, 0)
+        self.assertFalse(hh.state_path().exists())
+
+
+class TestRenderStatusBody(unittest.TestCase):
+    """渲染层按状态决定正文：前缀只在 running 出现，ended 不显示瞬时指令。"""
+
+    def test_running_prompt_gets_prefix(self):
+        now = time.time()
+        out = hh.render_content({"projects": {"p": {
+            "status": "running", "prompt": "跑测试", "updated_at": now}}}, now=now)
+        self.assertIn("正在处理：跑测试", out)
+
+    def test_ended_hides_prompt(self):
+        now = time.time()
+        out = hh.render_content({"projects": {"p": {
+            "status": "ended", "prompt": "跑测试", "updated_at": now}}}, now=now)
+        self.assertNotIn("跑测试", out)
+        self.assertIn("已结束", out)
+
+    def test_done_falls_back_to_prompt_when_no_summary(self):
+        now = time.time()
+        out = hh.render_content({"projects": {"p": {
+            "status": "done", "prompt": "跑测试", "updated_at": now}}}, now=now)
+        self.assertIn("跑测试", out)
+        self.assertNotIn("正在处理", out)
+
+
+class TestOnDemandPush(TmpDataDirTest):
+    """--push 子模式：轮转卡位、主题卡、校验、退出码。"""
+
+    def setUp(self):
+        super().setUp()
+        os.environ["HIBOARD_DRY_RUN"] = "1"
+
+    def tearDown(self):
+        os.environ.pop("HIBOARD_DRY_RUN", None)
+        super().tearDown()
+
+    def _push_file(self, **data):
+        p = Path(self._tmp.name) / f"push_{time.time_ns()}.json"
+        p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        return str(p)
+
+    def _pushed_card_ids(self):
+        logtext = hh.log_path().read_text(encoding="utf-8")
+        return re.findall(r'"scheduleTaskId": "(claude_code_[a-z0-9_]+)"', logtext)
+
+    def test_push_without_config_fails(self):
+        rc = hh.cmd_push(self._push_file(summary="t", content="c"))
+        self.assertEqual(rc, 1)
+
+    def test_push_missing_fields_fails(self):
+        _write_config()
+        self.assertEqual(hh.cmd_push(self._push_file(summary="只有标题")), 1)
+        self.assertEqual(hh.cmd_push(self._push_file(content="只有正文")), 1)
+
+    def test_push_oversized_content_fails(self):
+        _write_config()
+        rc = hh.cmd_push(self._push_file(summary="t",
+                                         content="长" * (hh.MAX_CARD_UTF16 + 1)))
+        self.assertEqual(rc, 1)
+
+    def test_ring_rotation_reuses_oldest_slot(self):
+        _write_config()
+        for i in range(4):  # 默认 3 槽，第 4 次应复用槽 1
+            rc = hh.cmd_push(self._push_file(summary=f"第{i}条", content="# 内容"))
+            self.assertEqual(rc, 0)
+        ids = self._pushed_card_ids()
+        self.assertEqual(ids, ["claude_code_manual_1", "claude_code_manual_2",
+                               "claude_code_manual_3", "claude_code_manual_1"])
+        slots = json.loads(hh.state_path().read_text(
+            encoding="utf-8"))["manual_slots"]
+        self.assertEqual(set(slots), {"1", "2", "3"})
+
+    def test_manual_slots_config_respected(self):
+        _write_config(manualSlots=2)
+        for i in range(3):
+            hh.cmd_push(self._push_file(summary=f"第{i}条", content="c"))
+        ids = self._pushed_card_ids()
+        self.assertEqual(ids, ["claude_code_manual_1", "claude_code_manual_2",
+                               "claude_code_manual_1"])
+
+    def test_topic_uses_stable_id_and_skips_ring(self):
+        _write_config()
+        for _ in range(2):
+            rc = hh.cmd_push(self._push_file(summary="日报", content="c",
+                                             topic="每日日报 Daily"))
+            self.assertEqual(rc, 0)
+        ids = self._pushed_card_ids()
+        self.assertEqual(len(set(ids)), 1)
+        self.assertTrue(ids[0].startswith("claude_code_topic_daily"))
+        # 主题卡完全不触碰轮转状态——state.json 根本不会被创建
+        if hh.state_path().exists():
+            state = json.loads(hh.state_path().read_text(encoding="utf-8"))
+            self.assertNotIn("manual_slots", state)
+        else:
+            self.assertFalse(hh.state_path().exists())
+
+    def test_push_custom_fields_land_in_payload(self):
+        _write_config()
+        hh.cmd_push(self._push_file(summary="标题", content="c",
+                                    source="日报", result="已生成"))
+        logtext = hh.log_path().read_text(encoding="utf-8")
+        self.assertIn('"source": "日报"', logtext)
+        self.assertIn('"result": "已生成"', logtext)
+
+    def test_push_cli_exit_codes(self):
+        env = os.environ.copy()
+        env["HIBOARD_DRY_RUN"] = "1"
+        r = subprocess.run(
+            [sys.executable, str(SCRIPTS / "hiboard_hook.py"), "--push",
+             "/nonexistent.json"],
+            capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 1)  # --push 失败必须非零，区别于 hook 恒零
 
 
 if __name__ == "__main__":

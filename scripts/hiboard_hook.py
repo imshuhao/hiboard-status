@@ -79,8 +79,16 @@ def render_content(state: dict, now=None) -> str:
     for name, e in items:
         st = effective_status(e, now)
         emoji, label = STATUS_META[st]
-        body = truncate_utf16(e.get("summary") or e.get("prompt") or "",
-                              MAX_PROJECT_UTF16)
+        prompt = e.get("prompt") or ""
+        if st == "running":
+            body = e.get("summary") or (f"正在处理：{prompt}" if prompt else "")
+        elif st == "waiting":
+            body = prompt
+        elif st == "done":
+            body = e.get("summary") or prompt
+        else:  # ended / stale：不再展示「正在处理」类瞬时信息
+            body = e.get("summary") or ""
+        body = truncate_utf16(body, MAX_PROJECT_UTF16)
         ts = fmt_time(e.get("updated_at", now), now=now)
         sections.append(f"## {emoji} {name} — {label}\n`{ts}` {body}".rstrip())
     content = "\n\n---\n\n".join(sections) or "_暂无会话_"
@@ -217,18 +225,20 @@ def load_config():
     return cfg
 
 
-def push_card(cfg: dict, summary: str, content: str) -> bool:
+def push_card(cfg: dict, summary: str, content: str, *,
+              card_id: str = CARD_ID, source: str = "Claude Code",
+              result: str = None, task_name: str = "Claude Code Status") -> bool:
     now = int(time.time())
     body = {"data": {
         "authCode": cfg["authCode"],
         "msgContent": [{
-            "msgId":            f"{CARD_ID}_{now}_{uuid.uuid4().hex[:6]}",
-            "scheduleTaskId":   CARD_ID,
-            "scheduleTaskName": "Claude Code Status",  # 必填但不显示（契约 §6.2）
+            "msgId":            f"{card_id}_{now}_{uuid.uuid4().hex[:6]}",
+            "scheduleTaskId":   card_id,
+            "scheduleTaskName": task_name,             # 必填但不显示（契约 §6.2）
             "summary":          summary,               # 列表态卡片标题
-            "result":           f"最后更新 {datetime.now():%H:%M}",
+            "result":           result or f"最后更新 {datetime.now():%H:%M}",
             "content":          content,
-            "source":           "Claude Code",         # 展开态主标题
+            "source":           source,                # 展开态主标题
             "taskFinishTime":   now,
         }],
     }}
@@ -332,10 +342,13 @@ def llm_summarize(text: str, cfg: dict):
     prompt = ("用两三句中文总结这段 AI 助手的工作汇报，"
               "说明做了什么、结果如何。直接输出总结，不要前言：\n\n" + text)
     try:
+        # HIBOARD_SUMMARIZING 会传导给无头会话触发的本插件 hooks，
+        # 使其直接退出——否则无头会话的 Stop 又会 spawn 摘要，无限递归。
         r = subprocess.run(
             ["claude", "-p", "--model", cfg.get("summaryModel", "haiku"),
              prompt],
             capture_output=True, text=True,
+            env={**os.environ, "HIBOARD_SUMMARIZING": "1"},
             timeout=cfg.get("summaryTimeout", 30))
         out = r.stdout.strip()
         return out if r.returncode == 0 and out else None
@@ -361,6 +374,8 @@ def run_summarize(proj: str, transcript_path: str) -> None:
 
 
 def handle_event(evt: dict) -> None:
+    if not load_config():
+        return  # 未配置即零副作用：不更新状态、不 spawn、不推送（设计 §9）
     name = evt.get("hook_event_name", "")
     proj = project_name(evt.get("cwd", ""))
     now = time.time()
@@ -372,7 +387,7 @@ def handle_event(evt: dict) -> None:
     elif name == "UserPromptSubmit":
         p = truncate_utf16(" ".join((evt.get("prompt") or "").split()),
                            MAX_PROMPT_UTF16)
-        fields = dict(base, status="running", prompt=f"正在处理：{p}", summary="")
+        fields = dict(base, status="running", prompt=p, summary="")  # 前缀由渲染层按状态添加
     elif name == "Stop":
         fields = dict(base, status="done", summary="（摘要生成中…）")
     elif name == "Notification":
@@ -388,7 +403,77 @@ def handle_event(evt: dict) -> None:
         spawn_summarizer(evt, proj)
 
 
+# ---------------------------------------------------------------- 按需推送
+
+def slugify_ascii(name: str) -> str:
+    """主题名 → ASCII slug（scheduleTaskId 组成部分，非 ASCII 会被剔除）。"""
+    s = "".join(c if c.isascii() and c.isalnum() else "_" for c in name).lower()
+    return re.sub(r"_+", "_", s).strip("_") or "topic"
+
+
+def cmd_push(path: str) -> int:
+    """--push 子模式：从 JSON 文件读取内容，推到轮转卡位或主题卡。
+
+    与 hook 路径不同：这是 Claude 主动调用的 CLI，失败必须 exit 1 让调用方察觉。
+    输入 JSON: {summary*, content*, source?, result?, topic?}
+    """
+    cfg = load_config()
+    if not cfg:
+        print("未找到有效配置：请先运行 /hiboard-status:setup")
+        return 1
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"读取推送文件失败: {type(e).__name__}: {e}")
+        return 1
+    summary = (data.get("summary") or "").strip()
+    content = data.get("content") or ""
+    if not summary or not content.strip():
+        print("summary 与 content 均为必填字段")
+        return 1
+    if utf16_len(content) > MAX_CARD_UTF16:
+        print(f"content 过长：{utf16_len(content)} > {MAX_CARD_UTF16} "
+              "UTF-16 码元（注意 emoji 计 2），请精简后重试")
+        return 1
+
+    topic = (data.get("topic") or "").strip()
+    if topic:
+        # 主题卡：固定 ID，同主题永远覆盖同一张卡（卡片不可删，慎用）
+        card_id = f"claude_code_topic_{slugify_ascii(topic)}"
+    else:
+        # 轮转卡位：复用最久未用的 manual 槽，卡片总数恒定
+        n = max(1, int(cfg.get("manualSlots", 3)))
+        chosen = []
+
+        def choose(state):
+            slots = state.setdefault("manual_slots", {})
+            keys = [str(i) for i in range(1, n + 1)]
+            k = min(keys, key=lambda x: slots.get(x, 0))
+            slots[k] = time.time()
+            chosen.append(k)
+
+        mutate_state(choose)
+        card_id = f"claude_code_manual_{chosen[0]}"
+
+    ok = push_card(cfg, truncate_utf16(summary, 60), content,
+                   card_id=card_id,
+                   source=(data.get("source") or "Claude Code 推送").strip(),
+                   result=(data.get("result") or "推送完成").strip(),
+                   task_name="Claude Code Push")
+    if ok:
+        print(f"推送成功（卡片 {card_id}）")
+        return 0
+    print(f"推送失败，详见 {log_path()}")
+    return 1
+
+
 def main(argv) -> int:
+    if len(argv) >= 2 and argv[1] == "--push":
+        try:
+            return cmd_push(argv[2] if len(argv) > 2 else "")
+        except Exception as e:
+            print(f"推送异常: {type(e).__name__}: {e}")
+            return 1
     try:
         if len(argv) >= 2 and argv[1] == "--summarize":
             run_summarize(argv[2], argv[3] if len(argv) > 3 else "")
@@ -402,11 +487,13 @@ def main(argv) -> int:
             print("推送成功，请到负一屏查看" if ok else
                   f"推送失败，详见 {log_path()}")
         else:
+            if os.environ.get("HIBOARD_SUMMARIZING"):
+                return 0  # 摘要无头会话触发的 hooks：直接忽略，防无限递归
             evt = json.load(sys.stdin)
             handle_event(evt)
     except Exception as e:
         log(f"ERROR {type(e).__name__}: {e}")
-    return 0  # 恒 0：旁路系统绝不打断 Claude Code
+    return 0  # 恒 0：hook 旁路绝不打断 Claude Code（--push 例外，见上）
 
 
 if __name__ == "__main__":

@@ -19,6 +19,16 @@
 
 卡片是静默的（负一屏 API 不发系统通知），适合「主动瞄一眼」而非「等提醒」。
 
+## 按需推送
+
+除了自动状态卡，还可以让 Claude 把任意内容推到负一屏——直接说：
+
+> 把这份日报推到负一屏
+
+推送内容默认写入 **3 个轮转卡位**（保留最近 3 次，自动复用最旧的，永不堆积）；
+周期性内容（如每日日报）可指定主题固定一张卡。详见
+[skills/push-to-hiboard/SKILL.md](skills/push-to-hiboard/SKILL.md)。
+
 ## 安装
 
 ```
@@ -48,6 +58,7 @@
 | `pushServiceUrl` | 华为官方端点 | 一般无需改动 |
 | `summaryModel` | `haiku` | 生成回合摘要的模型 |
 | `summaryTimeout` | `30` | 摘要生成超时（秒），超时降级为截断 |
+| `manualSlots` | `3` | 按需推送的轮转卡位数量 |
 | `enabled` | `true` | 全局开关 |
 
 ## 上游 API
@@ -57,4 +68,4 @@
 
 ## License
 
-MIT
+Apache 2.0
