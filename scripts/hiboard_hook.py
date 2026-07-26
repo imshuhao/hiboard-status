@@ -272,9 +272,69 @@ def spawn_summarizer(evt: dict, proj: str) -> None:
         start_new_session=True)
 
 
+# ---------------------------------------------------------------- Stop 摘要
+
+def last_assistant_text(transcript_path: str) -> str:
+    """从 Claude Code transcript（JSONL）提取最后一条 assistant 文本消息。"""
+    best = ""
+    try:
+        with open(transcript_path, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    obj = json.loads(line)
+                except (ValueError, json.JSONDecodeError):
+                    continue
+                if obj.get("type") != "assistant":
+                    continue
+                content = (obj.get("message") or {}).get("content")
+                if isinstance(content, str):
+                    text = content
+                elif isinstance(content, list):
+                    text = "\n".join(b.get("text", "") for b in content
+                                     if isinstance(b, dict)
+                                     and b.get("type") == "text")
+                else:
+                    continue
+                if text.strip():
+                    best = text.strip()
+    except OSError:
+        return ""
+    return best
+
+
+def llm_summarize(text: str, cfg: dict):
+    """调 claude CLI 生成摘要；任何失败返回 None（触发降级）。"""
+    if os.environ.get("HIBOARD_NO_LLM"):
+        return None
+    prompt = ("用两三句中文总结这段 AI 助手的工作汇报，"
+              "说明做了什么、结果如何。直接输出总结，不要前言：\n\n" + text)
+    try:
+        r = subprocess.run(
+            ["claude", "-p", "--model", cfg.get("summaryModel", "haiku"),
+             prompt],
+            capture_output=True, text=True,
+            timeout=cfg.get("summaryTimeout", 30))
+        out = r.stdout.strip()
+        return out if r.returncode == 0 and out else None
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+
+
 def run_summarize(proj: str, transcript_path: str) -> None:
-    """Task 7 实现真实逻辑；当前占位保证 --summarize 不崩。"""
-    log(f"SUMMARIZE_STUB {proj}")
+    """--summarize 子模式：后台生成摘要并二次推送。"""
+    text = last_assistant_text(transcript_path)
+    summary = None
+    if text:
+        cfg = load_config() or {}
+        summary = llm_summarize(text[-8000:], cfg)
+        if summary is None:
+            summary = truncate_utf16(text, 500)
+            log(f"SUMMARY_FALLBACK {proj}")
+    if not summary:
+        summary = "（本轮无文本输出）"
+    state = update_project(proj, {"summary": summary, "status": "done",
+                                  "updated_at": time.time()})
+    do_push(state)
 
 
 def handle_event(evt: dict) -> None:

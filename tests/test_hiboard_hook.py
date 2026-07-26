@@ -257,5 +257,76 @@ class TestDispatch(TmpDataDirTest):
         self.assertEqual(r.returncode, 0)
 
 
+def _write_transcript(path: Path, texts):
+    """构造 Claude Code transcript JSONL：texts 为 assistant 文本列表。"""
+    lines = []
+    for t in texts:
+        lines.append(json.dumps({"type": "user",
+                                 "message": {"role": "user", "content": "q"}}))
+        lines.append(json.dumps({
+            "type": "assistant",
+            "message": {"role": "assistant",
+                        "content": [{"type": "text", "text": t}]}}))
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+class TestSummarize(TmpDataDirTest):
+    def setUp(self):
+        super().setUp()
+        os.environ["HIBOARD_DRY_RUN"] = "1"
+        os.environ["HIBOARD_NO_LLM"] = "1"  # 强制走降级路径
+
+    def tearDown(self):
+        os.environ.pop("HIBOARD_DRY_RUN", None)
+        os.environ.pop("HIBOARD_NO_LLM", None)
+        super().tearDown()
+
+    def test_last_assistant_text_picks_last(self):
+        p = Path(self._tmp.name) / "t.jsonl"
+        _write_transcript(p, ["第一条", "最后一条"])
+        self.assertEqual(hh.last_assistant_text(str(p)), "最后一条")
+
+    def test_last_assistant_text_string_content(self):
+        p = Path(self._tmp.name) / "t.jsonl"
+        p.write_text(json.dumps({"type": "assistant",
+                                 "message": {"content": "纯字符串"}}),
+                     encoding="utf-8")
+        self.assertEqual(hh.last_assistant_text(str(p)), "纯字符串")
+
+    def test_last_assistant_text_missing_file(self):
+        self.assertEqual(hh.last_assistant_text("/nonexistent/x.jsonl"), "")
+
+    def test_last_assistant_text_skips_garbage_lines(self):
+        p = Path(self._tmp.name) / "t.jsonl"
+        p.write_text("garbage\n" + json.dumps({
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "ok"}]}}),
+            encoding="utf-8")
+        self.assertEqual(hh.last_assistant_text(str(p)), "ok")
+
+    def test_run_summarize_fallback_truncation(self):
+        _write_config()
+        hh.update_project("demo", {"status": "done",
+                                   "summary": "（摘要生成中…）",
+                                   "updated_at": time.time()})
+        p = Path(self._tmp.name) / "t.jsonl"
+        _write_transcript(p, ["工作汇报正文" * 200])
+        hh.run_summarize("demo", str(p))
+        e = json.loads(hh.state_path().read_text(
+            encoding="utf-8"))["projects"]["demo"]
+        self.assertNotIn("摘要生成中", e["summary"])
+        self.assertLessEqual(hh.utf16_len(e["summary"]), 500)
+
+    def test_run_summarize_empty_transcript(self):
+        _write_config()
+        hh.update_project("demo", {"status": "done",
+                                   "summary": "（摘要生成中…）",
+                                   "updated_at": time.time()})
+        hh.run_summarize("demo", "/nonexistent/x.jsonl")
+        e = json.loads(hh.state_path().read_text(
+            encoding="utf-8"))["projects"]["demo"]
+        self.assertEqual(e["summary"], "（本轮无文本输出）")
+
+
 if __name__ == "__main__":
     unittest.main()
