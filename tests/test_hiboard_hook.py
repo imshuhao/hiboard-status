@@ -328,5 +328,37 @@ class TestSummarize(TmpDataDirTest):
         self.assertEqual(e["summary"], "（本轮无文本输出）")
 
 
+class TestSecurity(TmpDataDirTest):
+    """state.json 含用户指令原文、push.log 可能含推送负载，均不应对同机他人可读。"""
+
+    def test_state_and_log_are_owner_only(self):
+        hh.update_project("demo", {"status": "running",
+                                   "prompt": "正在处理：改数据库密码",
+                                   "updated_at": time.time()})
+        hh.log("something")
+        for p in (hh.state_path(), hh.log_path()):
+            mode = p.stat().st_mode & 0o777
+            self.assertEqual(mode, 0o600, f"{p.name} 权限应为 600，实际 {oct(mode)}")
+
+    def test_data_dir_is_owner_only(self):
+        hh.ensure_dir()
+        mode = hh.data_dir().stat().st_mode & 0o777
+        self.assertEqual(mode, 0o700)
+
+    def test_dry_run_log_masks_auth_code(self):
+        os.environ["HIBOARD_DRY_RUN"] = "1"
+        try:
+            hh.push_card({"authCode": "SECRET123456"}, "标题", "正文")
+            logtext = hh.log_path().read_text(encoding="utf-8")
+            self.assertNotIn("SECRET123456", logtext)
+            self.assertIn('"authCode": "***"', logtext)
+        finally:
+            os.environ.pop("HIBOARD_DRY_RUN", None)
+
+    def test_truncate_zero_limit_returns_empty(self):
+        self.assertEqual(hh.truncate_utf16("abcdef", 0), "")
+        self.assertEqual(hh.truncate_utf16("abcdef", -1), "")
+
+
 if __name__ == "__main__":
     unittest.main()

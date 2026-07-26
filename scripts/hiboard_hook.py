@@ -10,11 +10,11 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
 import uuid
-import urllib.error
 import urllib.request
 from datetime import datetime
 from pathlib import Path
@@ -46,6 +46,8 @@ def utf16_len(s: str) -> int:
 
 def truncate_utf16(s: str, limit: int) -> str:
     """截断到 limit 个 UTF-16 码元以内，超长加 …（… 本身占 1 码元）。"""
+    if limit <= 0:
+        return ""
     if utf16_len(s) <= limit:
         return s
     cut = s.encode("utf-16-le")[: max(limit - 1, 0) * 2]
@@ -119,12 +121,31 @@ def log_path() -> Path:
     return data_dir() / "push.log"
 
 
+def ensure_dir() -> Path:
+    """创建数据目录，权限 0700。state/log 含用户指令原文，不应对同机他人可读。"""
+    d = data_dir()
+    d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        d.chmod(0o700)  # 目录已存在时 mkdir 的 mode 不生效，显式补一次
+    except OSError:
+        pass
+    return d
+
+
+def chmod_600(p: Path) -> None:
+    try:
+        p.chmod(0o600)
+    except OSError:
+        pass
+
+
 def log(msg: str) -> None:
     try:
-        data_dir().mkdir(parents=True, exist_ok=True)
+        ensure_dir()
         stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with open(log_path(), "a", encoding="utf-8") as f:
             f.write(f"{stamp} {msg}\n")
+        chmod_600(log_path())
     except Exception:
         pass  # 日志失败不影响任何流程
 
@@ -133,7 +154,7 @@ def log(msg: str) -> None:
 
 def mutate_state(mutator) -> dict:
     """flock 串行化：加载 → mutator 就地修改 → 清理过期 → 原子写回。"""
-    data_dir().mkdir(parents=True, exist_ok=True)
+    ensure_dir()
     with open(data_dir() / ".lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         try:
@@ -157,6 +178,7 @@ def mutate_state(mutator) -> dict:
             tmp = state_path().with_suffix(".json.tmp")
             tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2),
                            encoding="utf-8")
+            chmod_600(tmp)  # rename 前设权限，避免出现可读窗口
             tmp.rename(state_path())
             return state
         finally:
@@ -211,7 +233,9 @@ def push_card(cfg: dict, summary: str, content: str) -> bool:
         }],
     }}
     if os.environ.get("HIBOARD_DRY_RUN"):
-        log("DRY_RUN " + json.dumps(body, ensure_ascii=False)[:800])
+        masked = json.loads(json.dumps(body))  # 深拷贝，不动原 body
+        masked["data"]["authCode"] = "***"     # 日志绝不落授权码明文
+        log("DRY_RUN " + json.dumps(masked, ensure_ascii=False)[:800])
         return True
 
     req = urllib.request.Request(
@@ -235,8 +259,7 @@ def push_card(cfg: dict, summary: str, content: str) -> bool:
     desc = data.get("desc") or data.get("message") or ""
     hint = ERR_HINTS.get(code, "")
     if code == "0200100004":
-        import re as _re
-        m = _re.search(r"Receive error code (\d+) from CP", desc)
+        m = re.search(r"Receive error code (\d+) from CP", desc)
         if m:
             hint = CP_HINTS.get(m.group(1), f"未知 CP 错误码 {m.group(1)}")
     log(f"PUSH_FAIL {code} {desc}" + (f" — {hint}" if hint else ""))
