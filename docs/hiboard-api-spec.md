@@ -180,7 +180,12 @@ assert utf16_len(content) <= 30720
 | `0000900034` | `The authCode is invalid` | 授权码无效 / 未关联账号 | 引导用户重新获取授权码 |
 | `0000500001` | `Parameter x-trace-id is empty` | 缺少或空的 `x-trace-id` | 补上任意非空字符串 |
 | `0000500002` | `Parameter content size is too long` | 正文超过 30,720 码元 | 截断正文，见 §4 |
+| `0000400001` | `The count reached the upper limit` | **推送次数配额达上限** | 停止重试，等待配额重置 |
 | `0200100004` | `Receive error code N from CP` | 云推送服务异常 | 需二次解析，见 §5.3 |
+
+> `0000400001` 于 2026-07-26 17:15 实测触发：短时间内数百次推送（事故性递归）后出现，
+> 此前正常使用约 60 次未触发。配额的准确阈值与重置周期未知（疑似按日）；
+> spec 初测时 15 次无间隔请求（2.5 req/s）未触发，说明限的是**总量**而非瞬时速率。
 
 失败时消息可能在 `desc` 或 `message`，两者都要读。
 
