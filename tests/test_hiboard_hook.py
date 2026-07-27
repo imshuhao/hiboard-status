@@ -1,5 +1,6 @@
 import json, os, re, subprocess, sys, tempfile, time, unittest
 from pathlib import Path
+from unittest import mock
 
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPTS))
@@ -173,22 +174,30 @@ class TestConfigAndPush(TmpDataDirTest):
         self.assertIn('"data"', logtext)  # 外层 data 包装存在
 
     def test_do_push_without_config_is_noop(self):
-        state = hh.update_project("p", {"status": "running",
-                                        "updated_at": time.time()})
-        hh.do_push(state)  # 不应抛异常
+        hh.update_project("p", {"status": "running",
+                                "updated_at": time.time()})
+        hh.do_push()  # 不应抛异常
         self.assertFalse(hh.log_path().exists()
                          and "DRY_RUN" in hh.log_path().read_text(encoding="utf-8"))
 
     def test_do_push_dedupes_identical_content(self):
         _write_config()
         # updated_at 需为近期值，否则会被 7 天清理逻辑移除（同 Task 4 调整）
-        state = hh.update_project("p", {"status": "done", "summary": "x",
-                                        "updated_at": time.time()})
-        hh.do_push(state)
-        state = json.loads(hh.state_path().read_text(encoding="utf-8"))
-        hh.do_push(state)  # 内容未变，应跳过
+        hh.update_project("p", {"status": "done", "summary": "x",
+                                "updated_at": time.time()})
+        hh.do_push()
+        hh.do_push()  # 内容未变，应跳过
         logtext = hh.log_path().read_text(encoding="utf-8")
         self.assertEqual(logtext.count("DRY_RUN"), 1)
+
+    def test_do_push_clears_claim_after_success(self):
+        _write_config()
+        hh.update_project("p", {"status": "done", "summary": "x",
+                                "updated_at": time.time()})
+        hh.do_push()
+        state = json.loads(hh.state_path().read_text(encoding="utf-8"))
+        self.assertNotIn("push_claim", state)
+        self.assertIn("last_push_hash", state)
 
 
 def _run_hook(evt: dict, extra_env=None) -> subprocess.CompletedProcess:
@@ -254,6 +263,21 @@ class TestDispatch(TmpDataDirTest):
         _run_hook({"hook_event_name": "SessionEnd", "session_id": "ghost",
                    "cwd": "/tmp/myproj"})
         self.assertEqual(self._state()["projects"]["myproj"]["status"], "running")
+
+    def test_ghost_start_end_sequence_cannot_take_over(self):
+        # 审查复现的 Critical：幽灵会话 SessionStart+SessionEnd 连击。
+        # SessionStart 不得接管他人条目，其 SessionEnd 也因此被守卫拦截
+        _write_config()
+        _run_hook({"hook_event_name": "UserPromptSubmit", "session_id": "s1",
+                   "cwd": "/tmp/myproj", "prompt": "干活"})
+        _run_hook({"hook_event_name": "SessionStart", "session_id": "ghost",
+                   "cwd": "/tmp/myproj"})
+        _run_hook({"hook_event_name": "SessionEnd", "session_id": "ghost",
+                   "cwd": "/tmp/myproj"})
+        e = self._state()["projects"]["myproj"]
+        self.assertEqual(e["status"], "running")
+        self.assertIn("干活", e["prompt"])
+        self.assertEqual(e["session_id"], "s1")
 
     def test_session_end_unknown_project_creates_nothing(self):
         _write_config()
@@ -442,6 +466,67 @@ class TestSecurity(TmpDataDirTest):
         self.assertEqual(hh.truncate_utf16("abcdef", -1), "")
 
 
+class TestQuotaBreaker(TmpDataDirTest):
+    """0000400001 触发熔断：午夜前自动推送不再发起必败请求。"""
+
+    def _quota_response(self):
+        resp = mock.MagicMock()
+        resp.__enter__.return_value = resp
+        resp.read.return_value = json.dumps(
+            {"code": "0000400001",
+             "desc": "The count reached the upper limit"}).encode()
+        return resp
+
+    def test_quota_error_trips_breaker(self):
+        _write_config()
+        with mock.patch.object(hh.urllib.request, "urlopen",
+                               return_value=self._quota_response()):
+            ok = hh.push_card(hh.load_config(), "t", "c")
+        self.assertFalse(ok)
+        state = json.loads(hh.state_path().read_text(encoding="utf-8"))
+        self.assertGreater(state.get("quota_blocked_until", 0), time.time())
+
+    def test_do_push_skips_during_breaker(self):
+        _write_config()
+        hh.mutate_state(lambda s: s.update(
+            {"quota_blocked_until": time.time() + 3600}))
+        hh.update_project("p", {"status": "running", "prompt": "x",
+                                "updated_at": time.time()})
+        os.environ["HIBOARD_DRY_RUN"] = "1"
+        try:
+            hh.do_push()
+        finally:
+            os.environ.pop("HIBOARD_DRY_RUN", None)
+        logtext = (hh.log_path().read_text(encoding="utf-8")
+                   if hh.log_path().exists() else "")
+        self.assertNotIn("DRY_RUN", logtext)
+
+    def test_expired_breaker_allows_push(self):
+        _write_config()
+        hh.mutate_state(lambda s: s.update(
+            {"quota_blocked_until": time.time() - 60}))
+        hh.update_project("p", {"status": "running", "prompt": "x",
+                                "updated_at": time.time()})
+        os.environ["HIBOARD_DRY_RUN"] = "1"
+        try:
+            hh.do_push()
+        finally:
+            os.environ.pop("HIBOARD_DRY_RUN", None)
+        self.assertIn("DRY_RUN", hh.log_path().read_text(encoding="utf-8"))
+
+
+class TestSessionsMap(TmpDataDirTest):
+    def test_stale_session_mappings_pruned(self):
+        old = time.time() - hh.PRUNE_SECS - 60
+        hh.mutate_state(lambda s: s.update(
+            {"sessions": {"old-sid": {"proj": "x", "ts": old},
+                          "new-sid": {"proj": "y", "ts": time.time()}}}))
+        hh.mutate_state(lambda s: None)  # 任意一次写入都会触发清理
+        state = json.loads(hh.state_path().read_text(encoding="utf-8"))
+        self.assertNotIn("old-sid", state["sessions"])
+        self.assertIn("new-sid", state["sessions"])
+
+
 class TestRecursionAndGating(TmpDataDirTest):
     """摘要无头会话防递归 + 未配置零副作用。"""
 
@@ -570,6 +655,36 @@ class TestOnDemandPush(TmpDataDirTest):
         ids = self._pushed_card_ids()
         self.assertEqual(ids, ["claude_code_manual_1", "claude_code_manual_2",
                                "claude_code_manual_1"])
+
+    def test_chinese_topics_get_distinct_ids(self):
+        # 纯中文主题若全部塌缩成同一 slug，主题卡会互相覆盖且永久存在
+        _write_config()
+        hh.cmd_push(self._push_file(summary="日报", content="c", topic="每日日报"))
+        hh.cmd_push(self._push_file(summary="周报", content="c", topic="每周周报"))
+        ids = set(self._pushed_card_ids())
+        self.assertEqual(len(ids), 2)
+
+    def test_ascii_topic_slug_unchanged(self):
+        # 纯 ASCII 主题保持原 slug，不破坏已存在的主题卡 ID
+        self.assertEqual(hh.slugify_ascii("Daily Report"), "daily_report")
+
+    def test_failed_push_restores_ring_slot(self):
+        _write_config()
+        # 先占满一个卡位建立基线
+        hh.cmd_push(self._push_file(summary="占位", content="c"))
+        before = json.loads(hh.state_path().read_text(
+            encoding="utf-8"))["manual_slots"]
+        # 关掉 DRY_RUN 并把端点指向不可达地址，制造真实推送失败
+        os.environ.pop("HIBOARD_DRY_RUN", None)
+        try:
+            _write_config(pushServiceUrl="http://127.0.0.1:1/x")
+            rc = hh.cmd_push(self._push_file(summary="必败", content="c"))
+        finally:
+            os.environ["HIBOARD_DRY_RUN"] = "1"
+        self.assertEqual(rc, 1)
+        after = json.loads(hh.state_path().read_text(
+            encoding="utf-8"))["manual_slots"]
+        self.assertEqual(after, before)  # 失败不烧轮转位置
 
     def test_topic_uses_stable_id_and_skips_ring(self):
         _write_config()

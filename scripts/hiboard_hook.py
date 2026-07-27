@@ -158,10 +158,17 @@ def chmod_600(p: Path) -> None:
 def log(msg: str) -> None:
     try:
         ensure_dir()
+        p = log_path()
+        try:
+            if p.stat().st_size > 512 * 1024:  # 轮转：只留最近 500 行
+                lines = p.read_text(encoding="utf-8").splitlines()[-500:]
+                p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        except OSError:
+            pass
         stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        with open(log_path(), "a", encoding="utf-8") as f:
+        with open(p, "a", encoding="utf-8") as f:
             f.write(f"{stamp} {msg}\n")
-        chmod_600(log_path())
+        chmod_600(p)
     except Exception:
         pass  # 日志失败不影响任何流程
 
@@ -240,7 +247,8 @@ def load_config():
 
 def push_card(cfg: dict, summary: str, content: str, *,
               card_id: str = CARD_ID, source: str = "Claude Code",
-              result: str = None, task_name: str = "Claude Code Status") -> bool:
+              result: str = None, task_name: str = "Claude Code Status",
+              timeout: float = 15) -> bool:
     now = int(time.time())
     body = {"data": {
         "authCode": cfg["authCode"],
@@ -266,11 +274,11 @@ def push_card(cfg: dict, summary: str, content: str, *,
         data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
         headers={
             "Content-Type": "application/json; charset=utf-8",
-            "User-Agent":   "hiboard-status/0.2.4",
+            "User-Agent":   "hiboard-status/0.2.5",
             "x-trace-id":   f"ccs-{now}-{uuid.uuid4().hex[:8]}",  # 必需，非空即可
         })
     try:
-        with urllib.request.urlopen(req, timeout=15) as r:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             data = json.loads(r.read().decode("utf-8"))
     except Exception as e:
         log(f"PUSH_FAIL {type(e).__name__}: {e}")
@@ -286,20 +294,57 @@ def push_card(cfg: dict, summary: str, content: str, *,
         if m:
             hint = CP_HINTS.get(m.group(1), f"未知 CP 错误码 {m.group(1)}")
     log(f"PUSH_FAIL {code} {desc}" + (f" — {hint}" if hint else ""))
+    if code == "0000400001":
+        # 配额熔断：按日配额已尽（午夜重置，实测见 api-spec §5.2）。
+        # 记入 state 后 do_push 在午夜前不再尝试；CLI 模式不受熔断限制
+        try:
+            until = next_midnight()
+            mutate_state(lambda s: s.update({"quota_blocked_until": until}))
+        except Exception:
+            pass
     return False
 
 
-def do_push(state: dict) -> None:
+def next_midnight() -> float:
+    dt = datetime.fromtimestamp(time.time())
+    return datetime(dt.year, dt.month, dt.day).timestamp() + 86400
+
+
+def do_push() -> None:
+    """渲染并推送状态卡。渲染与哈希认领在锁内完成：并发进程（多会话 hook、
+    后台摘要）对同一内容只推一次；认领 60 秒过期，进程被杀不会永久卡住。
+    配额熔断期间（quota_blocked_until）自动推送直接跳过，省掉必败的请求。"""
     cfg = load_config()
     if not cfg:
         return
-    content = render_content(state)
-    summary = render_summary(state)
-    digest = hashlib.sha256(f"{summary}\n{content}".encode()).hexdigest()
-    if state.get("last_push_hash") == digest:
+    payload = {}
+
+    def claim(state):
+        if state.get("quota_blocked_until", 0) > time.time():
+            return
+        content = render_content(state)
+        summary = render_summary(state)
+        digest = hashlib.sha256(f"{summary}\n{content}".encode()).hexdigest()
+        if state.get("last_push_hash") == digest:
+            return
+        c = state.get("push_claim") or {}
+        if c.get("digest") == digest and time.time() - c.get("ts", 0) < 60:
+            return  # 另一进程正在推同样的内容
+        state["push_claim"] = {"digest": digest, "ts": time.time()}
+        payload.update(digest=digest, summary=summary, content=content)
+
+    mutate_state(claim)
+    if not payload:
         return
-    if push_card(cfg, summary, content):
-        mutate_state(lambda s: s.update({"last_push_hash": digest}))
+    ok = push_card(cfg, payload["summary"], payload["content"], timeout=6)
+
+    def finish(state):
+        if (state.get("push_claim") or {}).get("digest") == payload["digest"]:
+            state.pop("push_claim", None)
+        if ok:
+            state["last_push_hash"] = payload["digest"]
+
+    mutate_state(finish)
 
 
 # ---------------------------------------------------------------- 事件分发
@@ -403,6 +448,8 @@ def run_summarize(proj: str, transcript_path: str, turn_ts: float) -> None:
             log(f"SUMMARY_FALLBACK {proj}")
     if not summary:
         summary = "（本轮无文本输出）"
+    # 压掉换行：截断降级路径是转录原文，行首的 ## / --- 会伪造卡片分节
+    summary = " ".join(summary.split())
 
     applied = []
 
@@ -413,11 +460,11 @@ def run_summarize(proj: str, transcript_path: str, turn_ts: float) -> None:
             e.update({"summary": summary, "summary_ts": turn_ts})
             applied.append(True)
 
-    state = mutate_state(apply)
+    mutate_state(apply)
     if applied:
-        do_push(state)
+        do_push()
     else:
-        log(f"SUMMARY_OUTDATED {proj} 已有更新回合的摘要，跳过")
+        log(f"SUMMARY_OUTDATED {proj} 已有更新回合的摘要或条目已清理，跳过")
 
 
 def handle_event(evt: dict) -> None:
@@ -440,6 +487,13 @@ def handle_event(evt: dict) -> None:
         # summary 只有 Stop（占位符）和摘要进程会写，其余事件一律保留——
         # 它是「最近完成回合的总结」，跨指令、跨会话有效（设计 2026-07-27）
         if name == "SessionStart":
+            # 幽灵会话防护（v0.2.5）：条目属于其他会话时只登记映射、不接管。
+            # 桌面 App 秒开秒关的幽灵会话由此彻底隐形——它的 SessionEnd 也会
+            # 因 session_id 不匹配被拦；真实新会话在首次 UserPromptSubmit 接管
+            if entry is not None and entry.get("session_id") \
+                    and entry["session_id"] != base["session_id"]:
+                result["skip"] = True
+                return
             fields = dict(base, status="running", prompt="")
         elif name == "UserPromptSubmit":
             p = truncate_utf16(" ".join((evt.get("prompt") or "").split()),
@@ -459,10 +513,15 @@ def handle_event(evt: dict) -> None:
             fields = dict(base, status="ended")
         state["projects"].setdefault(proj, {}).update(fields)
 
-    state = mutate_state(m)
+    mutate_state(m)
     if result.get("skip"):
         return
-    do_push(state)
+    if name == "Stop" and not os.environ.get("HIBOARD_NO_SUMMARY"):
+        # 省一次配额：占位推送略过，摘要进程 10-30 秒内必推（含 LLM 失败的
+        # 截断降级路径）；每回合配额消耗从 ~3 次降到 ~2 次
+        spawn_summarizer(evt, result["proj"], now)
+        return
+    do_push()
     if name == "Stop":
         spawn_summarizer(evt, result["proj"], now)
 
@@ -470,9 +529,14 @@ def handle_event(evt: dict) -> None:
 # ---------------------------------------------------------------- 按需推送
 
 def slugify_ascii(name: str) -> str:
-    """主题名 → ASCII slug（scheduleTaskId 组成部分，非 ASCII 会被剔除）。"""
+    """主题名 → 稳定 slug。含非 ASCII 字符时附加短哈希——否则所有中文主题
+    会塌缩成同一个 ID 互相覆盖，而主题卡永久存在，塌缩无法挽回。"""
     s = "".join(c if c.isascii() and c.isalnum() else "_" for c in name).lower()
-    return re.sub(r"_+", "_", s).strip("_") or "topic"
+    s = re.sub(r"_+", "_", s).strip("_")
+    if not name.isascii():
+        h = hashlib.md5(name.encode("utf-8")).hexdigest()[:6]
+        s = f"{s}_{h}" if s else h
+    return s or "topic"
 
 
 def cmd_push(path: str) -> int:
@@ -513,11 +577,11 @@ def cmd_push(path: str) -> int:
             slots = state.setdefault("manual_slots", {})
             keys = [str(i) for i in range(1, n + 1)]
             k = min(keys, key=lambda x: slots.get(x, 0))
-            slots[k] = time.time()
-            chosen.append(k)
+            chosen.append({"k": k, "old": slots.get(k), "new": time.time()})
+            slots[k] = chosen[0]["new"]
 
         mutate_state(choose)
-        card_id = f"claude_code_manual_{chosen[0]}"
+        card_id = f"claude_code_manual_{chosen[0]['k']}"
 
     ok = push_card(cfg, truncate_utf16(summary, 60), content,
                    card_id=card_id,
@@ -527,6 +591,20 @@ def cmd_push(path: str) -> int:
     if ok:
         print(f"推送成功（卡片 {card_id}）")
         return 0
+    if not topic:
+        # 推送失败回滚卡位时间戳，不烧掉轮转位置；若期间已被并发推送
+        # 再次占用（时间戳不再是我们写的值）则不动
+        c = chosen[0]
+
+        def restore(state):
+            slots = state.setdefault("manual_slots", {})
+            if slots.get(c["k"]) == c["new"]:
+                if c["old"] is None:
+                    slots.pop(c["k"], None)
+                else:
+                    slots[c["k"]] = c["old"]
+
+        mutate_state(restore)
     print(f"推送失败，详见 {log_path()}")
     return 1
 

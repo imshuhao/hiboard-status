@@ -4,6 +4,7 @@
 回合结束后看到 AI 生成的工作摘要。
 
 > **硬件门槛：需要华为手机 + 负一屏（HiBoard）。** 其他设备无法使用本插件。
+> 运行 Claude Code 的主机需为 macOS/Linux（hook 脚本依赖 POSIX 文件锁）。
 
 ## 效果
 
