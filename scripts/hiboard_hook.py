@@ -25,6 +25,7 @@ CARD_ID = "claude_code_status"
 MAX_CARD_UTF16 = 28000
 MAX_PROJECT_UTF16 = 3000
 MAX_PROMPT_UTF16 = 60
+MAX_LAST_SUMMARY_UTF16 = 300
 STALE_SECS = 2 * 3600
 PRUNE_SECS = 7 * 24 * 3600
 SUMMARY_PLACEHOLDER = "（摘要生成中…）"
@@ -81,15 +82,20 @@ def render_content(state: dict, now=None) -> str:
         st = effective_status(e, now)
         emoji, label = STATUS_META.get(st, STATUS_META["stale"])
         prompt = e.get("prompt") or ""
+        summary = e.get("summary") or ""  # 语义：最近一个已完成回合的总结
         if st == "running":
-            body = e.get("summary") or (f"正在处理：{prompt}" if prompt else "")
+            body = f"正在处理：{prompt}" if prompt else ""
         elif st == "waiting":
             body = prompt
         elif st == "done":
-            body = e.get("summary") or prompt
+            body = summary or prompt
         else:  # ended / stale：不再展示「正在处理」类瞬时信息
-            body = e.get("summary") or ""
+            body = summary
         body = truncate_utf16(body, MAX_PROJECT_UTF16)
+        if st in ("running", "waiting") and summary:
+            # 硬换行（行尾两空格）；渲染器不支持时降级为同行显示，仍可读
+            body += ("  \n" if body else "") + "↳ 上轮：" + \
+                truncate_utf16(summary, MAX_LAST_SUMMARY_UTF16)
         ts = fmt_time(e.get("updated_at", now), now=now)
         sections.append(f"## {emoji} {name} — {label}\n`{ts}` {body}".rstrip())
     content = "\n\n---\n\n".join(sections) or "_暂无会话_"
@@ -256,7 +262,7 @@ def push_card(cfg: dict, summary: str, content: str, *,
         data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
         headers={
             "Content-Type": "application/json; charset=utf-8",
-            "User-Agent":   "hiboard-status/0.2.2",
+            "User-Agent":   "hiboard-status/0.2.3",
             "x-trace-id":   f"ccs-{now}-{uuid.uuid4().hex[:8]}",  # 必需，非空即可
         })
     try:
@@ -298,12 +304,12 @@ def project_name(cwd: str) -> str:
     return Path(cwd).name or "unknown" if cwd else "unknown"
 
 
-def spawn_summarizer(evt: dict, proj: str) -> None:
+def spawn_summarizer(evt: dict, proj: str, turn_ts: float) -> None:
     if os.environ.get("HIBOARD_NO_SUMMARY"):
         return
     subprocess.Popen(
         [sys.executable, os.path.abspath(__file__), "--summarize", proj,
-         evt.get("transcript_path", "") or ""],
+         evt.get("transcript_path", "") or "", str(turn_ts)],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         start_new_session=True)
 
@@ -359,8 +365,13 @@ def llm_summarize(text: str, cfg: dict):
         return None
 
 
-def run_summarize(proj: str, transcript_path: str) -> None:
-    """--summarize 子模式：后台生成摘要并二次推送。"""
+def run_summarize(proj: str, transcript_path: str, turn_ts: float) -> None:
+    """--summarize 子模式：后台生成摘要并二次推送。
+
+    summary 语义为「最近一个已完成回合的总结」，本函数只写 summary/summary_ts，
+    绝不碰 status/prompt/updated_at——写入时机因此永远无害（迟到只是更新
+    running 卡片的「上轮」行），v0.2.2 的占位符守卫随之删除。
+    """
     text = last_assistant_text(transcript_path)
     summary = None
     if text:
@@ -376,20 +387,16 @@ def run_summarize(proj: str, transcript_path: str) -> None:
 
     def apply(state):
         e = state["projects"].get(proj)
-        # 仅当 Stop 留下的占位符仍在时写入：若期间有新事件重置了该项目
-        # （新指令→running、新 Stop→新占位符），迟到的摘要直接丢弃，
-        # 避免把 running 覆盖回 done。同时兜住多个摘要进程并发：先到者
-        # 消费占位符，后到者自然落空，不产生多余推送。
-        if e and e.get("summary") == SUMMARY_PLACEHOLDER:
-            e.update({"summary": summary, "status": "done",
-                      "updated_at": time.time()})
+        # 乱序防护：旧回合的摘要不得覆盖新回合的（turn_ts 为 Stop 时刻）
+        if e and turn_ts >= e.get("summary_ts", 0):
+            e.update({"summary": summary, "summary_ts": turn_ts})
             applied.append(True)
 
     state = mutate_state(apply)
     if applied:
         do_push(state)
     else:
-        log(f"SUMMARY_STALE {proj} 状态已被新事件更新，迟到摘要丢弃")
+        log(f"SUMMARY_OUTDATED {proj} 已有更新回合的摘要，跳过")
 
 
 def handle_event(evt: dict) -> None:
@@ -401,16 +408,19 @@ def handle_event(evt: dict) -> None:
     base = {"session_id": evt.get("session_id", ""),
             "cwd": evt.get("cwd", ""), "updated_at": now}
 
+    # summary 只有 Stop（占位符）和摘要进程会写，其余事件一律保留——
+    # 它是「最近完成回合的总结」，跨指令、跨会话有效（设计 2026-07-27）
     if name == "SessionStart":
-        fields = dict(base, status="running", prompt="", summary="")
+        fields = dict(base, status="running", prompt="")
     elif name == "UserPromptSubmit":
         p = truncate_utf16(" ".join((evt.get("prompt") or "").split()),
                            MAX_PROMPT_UTF16)
-        fields = dict(base, status="running", prompt=p, summary="")  # 前缀由渲染层按状态添加
+        fields = dict(base, status="running", prompt=p)  # 前缀由渲染层按状态添加
     elif name == "Stop":
-        fields = dict(base, status="done", summary=SUMMARY_PLACEHOLDER)
+        fields = dict(base, status="done", summary=SUMMARY_PLACEHOLDER,
+                      summary_ts=now)
     elif name == "Notification":
-        fields = dict(base, status="waiting")  # 不动 prompt/summary
+        fields = dict(base, status="waiting")
     elif name == "SessionEnd":
         fields = dict(base, status="ended")
     else:
@@ -419,7 +429,7 @@ def handle_event(evt: dict) -> None:
     state = update_project(proj, fields)
     do_push(state)
     if name == "Stop":
-        spawn_summarizer(evt, proj)
+        spawn_summarizer(evt, proj, now)
 
 
 # ---------------------------------------------------------------- 按需推送
@@ -511,7 +521,8 @@ def main(argv) -> int:
             return 1
     try:
         if mode == "--summarize":
-            run_summarize(argv[2], argv[3] if len(argv) > 3 else "")
+            run_summarize(argv[2], argv[3] if len(argv) > 3 else "",
+                          float(argv[4]) if len(argv) > 4 else 0.0)
         else:
             if os.environ.get("HIBOARD_SUMMARIZING"):
                 return 0  # 摘要无头会话触发的 hooks：直接忽略，防无限递归

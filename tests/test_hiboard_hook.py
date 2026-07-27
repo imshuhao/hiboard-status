@@ -244,6 +244,21 @@ class TestDispatch(TmpDataDirTest):
                    "cwd": "/tmp/myproj"})
         self.assertEqual(self._state()["projects"]["myproj"]["status"], "ended")
 
+    def test_new_prompt_and_session_start_preserve_summary(self):
+        # summary 是「最近完成回合的总结」，新指令与新会话都不清空它
+        _write_config()
+        _run_hook({"hook_event_name": "Stop", "session_id": "s1",
+                   "cwd": "/tmp/myproj", "transcript_path": "/nonexistent"})
+        _run_hook({"hook_event_name": "UserPromptSubmit", "session_id": "s1",
+                   "cwd": "/tmp/myproj", "prompt": "下一件事"})
+        e = self._state()["projects"]["myproj"]
+        self.assertEqual(e["status"], "running")
+        self.assertEqual(e["summary"], hh.SUMMARY_PLACEHOLDER)
+        _run_hook({"hook_event_name": "SessionStart", "session_id": "s2",
+                   "cwd": "/tmp/myproj"})
+        self.assertEqual(self._state()["projects"]["myproj"]["summary"],
+                         hh.SUMMARY_PLACEHOLDER)
+
     def test_garbage_stdin_exits_zero(self):
         env = os.environ.copy()
         r = subprocess.run([sys.executable, str(SCRIPTS / "hiboard_hook.py")],
@@ -310,7 +325,7 @@ class TestSummarize(TmpDataDirTest):
                                    "updated_at": time.time()})
         p = Path(self._tmp.name) / "t.jsonl"
         _write_transcript(p, ["工作汇报正文" * 200])
-        hh.run_summarize("demo", str(p))
+        hh.run_summarize("demo", str(p), time.time())
         e = json.loads(hh.state_path().read_text(
             encoding="utf-8"))["projects"]["demo"]
         self.assertNotIn("摘要生成中", e["summary"])
@@ -321,37 +336,43 @@ class TestSummarize(TmpDataDirTest):
         hh.update_project("demo", {"status": "done",
                                    "summary": "（摘要生成中…）",
                                    "updated_at": time.time()})
-        hh.run_summarize("demo", "/nonexistent/x.jsonl")
+        hh.run_summarize("demo", "/nonexistent/x.jsonl", time.time())
         e = json.loads(hh.state_path().read_text(
             encoding="utf-8"))["projects"]["demo"]
         self.assertEqual(e["summary"], "（本轮无文本输出）")
 
-    def test_late_summary_discarded_after_new_prompt(self):
-        # 竞态守卫：摘要生成期间用户提交了新指令（占位符已被清空），
-        # 迟到的摘要不得把 running 覆盖回 done
+    def test_late_summary_lands_without_touching_status(self):
+        # 语义重构核心：摘要生成期间用户提交了新指令，迟到摘要照常落入
+        # summary（渲染为「上轮」行），但绝不碰 status/prompt/updated_at
         _write_config()
+        before = time.time() - 5
         hh.update_project("demo", {"status": "running", "prompt": "新任务",
-                                   "summary": "", "updated_at": time.time()})
+                                   "summary": hh.SUMMARY_PLACEHOLDER,
+                                   "summary_ts": before,
+                                   "updated_at": before})
         p = Path(self._tmp.name) / "t.jsonl"
         _write_transcript(p, ["上一轮的汇报"])
-        hh.run_summarize("demo", str(p))
+        hh.run_summarize("demo", str(p), before)
         e = json.loads(hh.state_path().read_text(
             encoding="utf-8"))["projects"]["demo"]
         self.assertEqual(e["status"], "running")
-        self.assertEqual(e["summary"], "")
+        self.assertEqual(e["prompt"], "新任务")
+        self.assertIn("上一轮的汇报", e["summary"])
+        self.assertEqual(e["updated_at"], before)  # 不影响排序与 stale 判定
 
-    def test_summary_applies_when_placeholder_present(self):
+    def test_out_of_order_summary_rejected(self):
+        # 乱序防护：旧回合的摘要不得覆盖新回合的
         _write_config()
-        hh.update_project("demo", {"status": "done",
-                                   "summary": hh.SUMMARY_PLACEHOLDER,
-                                   "updated_at": time.time()})
+        newer = time.time()
+        hh.update_project("demo", {"status": "done", "summary": "新回合摘要",
+                                   "summary_ts": newer,
+                                   "updated_at": newer})
         p = Path(self._tmp.name) / "t.jsonl"
-        _write_transcript(p, ["本轮的汇报"])
-        hh.run_summarize("demo", str(p))
+        _write_transcript(p, ["旧回合的汇报"])
+        hh.run_summarize("demo", str(p), newer - 100)
         e = json.loads(hh.state_path().read_text(
             encoding="utf-8"))["projects"]["demo"]
-        self.assertEqual(e["status"], "done")
-        self.assertIn("本轮的汇报", e["summary"])
+        self.assertEqual(e["summary"], "新回合摘要")
 
 
 class TestSecurity(TmpDataDirTest):
@@ -428,6 +449,29 @@ class TestRenderStatusBody(unittest.TestCase):
             "status": "done", "prompt": "跑测试", "updated_at": now}}}, now=now)
         self.assertIn("跑测试", out)
         self.assertNotIn("正在处理", out)
+
+    def test_running_shows_last_summary_line(self):
+        now = time.time()
+        out = hh.render_content({"projects": {"p": {
+            "status": "running", "prompt": "修复登录", "summary": "重构了 token 逻辑",
+            "updated_at": now}}}, now=now)
+        self.assertIn("正在处理：修复登录", out)
+        self.assertIn("↳ 上轮：重构了 token 逻辑", out)
+
+    def test_waiting_shows_last_summary_line(self):
+        now = time.time()
+        out = hh.render_content({"projects": {"p": {
+            "status": "waiting", "prompt": "要继续吗", "summary": "跑完了测试",
+            "updated_at": now}}}, now=now)
+        self.assertIn("↳ 上轮：跑完了测试", out)
+
+    def test_done_has_no_last_summary_line(self):
+        # done 状态摘要即正文，不重复渲染「上轮」行
+        now = time.time()
+        out = hh.render_content({"projects": {"p": {
+            "status": "done", "summary": "完成了重构", "updated_at": now}}}, now=now)
+        self.assertIn("完成了重构", out)
+        self.assertNotIn("上轮", out)
 
     def test_unknown_status_renders_as_stale_not_crash(self):
         # 手改 state.json 或版本回退可能出现未知状态值，渲染须兜底
