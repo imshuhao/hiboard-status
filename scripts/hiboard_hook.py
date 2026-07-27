@@ -27,6 +27,7 @@ MAX_PROJECT_UTF16 = 3000
 MAX_PROMPT_UTF16 = 60
 STALE_SECS = 2 * 3600
 PRUNE_SECS = 7 * 24 * 3600
+SUMMARY_PLACEHOLDER = "（摘要生成中…）"
 
 STATUS_META = {
     "running": ("🟢", "运行中"),
@@ -78,7 +79,7 @@ def render_content(state: dict, now=None) -> str:
     sections = []
     for name, e in items:
         st = effective_status(e, now)
-        emoji, label = STATUS_META[st]
+        emoji, label = STATUS_META.get(st, STATUS_META["stale"])
         prompt = e.get("prompt") or ""
         if st == "running":
             body = e.get("summary") or (f"正在处理：{prompt}" if prompt else "")
@@ -105,7 +106,8 @@ def render_summary(state: dict, now=None) -> str:
                   if effective_status(e, now) == "running")
     name, latest = max(projects.items(),
                        key=lambda kv: kv[1].get("updated_at", 0))
-    _, label = STATUS_META[effective_status(latest, now)]
+    _, label = STATUS_META.get(effective_status(latest, now),
+                               STATUS_META["stale"])
     parts = ([f"{running} 个会话运行中"] if running else []) + [f"{name} {label}"]
     return truncate_utf16(" · ".join(parts), 60)
 
@@ -254,7 +256,7 @@ def push_card(cfg: dict, summary: str, content: str, *,
         data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
         headers={
             "Content-Type": "application/json; charset=utf-8",
-            "User-Agent":   "hiboard-status/0.2.1",
+            "User-Agent":   "hiboard-status/0.2.2",
             "x-trace-id":   f"ccs-{now}-{uuid.uuid4().hex[:8]}",  # 必需，非空即可
         })
     try:
@@ -369,9 +371,25 @@ def run_summarize(proj: str, transcript_path: str) -> None:
             log(f"SUMMARY_FALLBACK {proj}")
     if not summary:
         summary = "（本轮无文本输出）"
-    state = update_project(proj, {"summary": summary, "status": "done",
-                                  "updated_at": time.time()})
-    do_push(state)
+
+    applied = []
+
+    def apply(state):
+        e = state["projects"].get(proj)
+        # 仅当 Stop 留下的占位符仍在时写入：若期间有新事件重置了该项目
+        # （新指令→running、新 Stop→新占位符），迟到的摘要直接丢弃，
+        # 避免把 running 覆盖回 done。同时兜住多个摘要进程并发：先到者
+        # 消费占位符，后到者自然落空，不产生多余推送。
+        if e and e.get("summary") == SUMMARY_PLACEHOLDER:
+            e.update({"summary": summary, "status": "done",
+                      "updated_at": time.time()})
+            applied.append(True)
+
+    state = mutate_state(apply)
+    if applied:
+        do_push(state)
+    else:
+        log(f"SUMMARY_STALE {proj} 状态已被新事件更新，迟到摘要丢弃")
 
 
 def handle_event(evt: dict) -> None:
@@ -390,7 +408,7 @@ def handle_event(evt: dict) -> None:
                            MAX_PROMPT_UTF16)
         fields = dict(base, status="running", prompt=p, summary="")  # 前缀由渲染层按状态添加
     elif name == "Stop":
-        fields = dict(base, status="done", summary="（摘要生成中…）")
+        fields = dict(base, status="done", summary=SUMMARY_PLACEHOLDER)
     elif name == "Notification":
         fields = dict(base, status="waiting")  # 不动 prompt/summary
     elif name == "SessionEnd":
@@ -468,25 +486,32 @@ def cmd_push(path: str) -> int:
     return 1
 
 
+def cmd_test_push() -> int:
+    cfg = load_config()
+    if not cfg:
+        print("未找到有效配置：请先创建 ~/.claude/hiboard/config.json")
+        return 1
+    ok = push_card(cfg, "hiboard-status 配置成功 ✅",
+                   "# 配置成功\n\nClaude Code 会话状态将推送到这张卡片。")
+    print("推送成功，请到负一屏查看" if ok else
+          f"推送失败，详见 {log_path()}")
+    return 0 if ok else 1
+
+
 def main(argv) -> int:
-    if len(argv) >= 2 and argv[1] == "--push":
+    mode = argv[1] if len(argv) >= 2 else ""
+    if mode in ("--push", "--test-push"):
+        # Claude/用户主动调用的 CLI 模式：失败必须非零，让调用方察觉
         try:
-            return cmd_push(argv[2] if len(argv) > 2 else "")
+            if mode == "--push":
+                return cmd_push(argv[2] if len(argv) > 2 else "")
+            return cmd_test_push()
         except Exception as e:
             print(f"推送异常: {type(e).__name__}: {e}")
             return 1
     try:
-        if len(argv) >= 2 and argv[1] == "--summarize":
+        if mode == "--summarize":
             run_summarize(argv[2], argv[3] if len(argv) > 3 else "")
-        elif len(argv) >= 2 and argv[1] == "--test-push":
-            cfg = load_config()
-            if not cfg:
-                print("未找到有效配置：请先创建 ~/.claude/hiboard/config.json")
-                return 0
-            ok = push_card(cfg, "hiboard-status 配置成功 ✅",
-                           "# 配置成功\n\nClaude Code 会话状态将推送到这张卡片。")
-            print("推送成功，请到负一屏查看" if ok else
-                  f"推送失败，详见 {log_path()}")
         else:
             if os.environ.get("HIBOARD_SUMMARIZING"):
                 return 0  # 摘要无头会话触发的 hooks：直接忽略，防无限递归
@@ -494,7 +519,7 @@ def main(argv) -> int:
             handle_event(evt)
     except Exception as e:
         log(f"ERROR {type(e).__name__}: {e}")
-    return 0  # 恒 0：hook 旁路绝不打断 Claude Code（--push 例外，见上）
+    return 0  # 恒 0：hook 旁路绝不打断 Claude Code
 
 
 if __name__ == "__main__":

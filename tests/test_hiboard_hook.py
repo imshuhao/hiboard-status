@@ -218,8 +218,7 @@ class TestDispatch(TmpDataDirTest):
                    "cwd": "/tmp/myproj", "prompt": "改" * 200})
         e = self._state()["projects"]["myproj"]
         self.assertEqual(e["status"], "running")
-        self.assertLessEqual(hh.utf16_len(e["prompt"]),
-                             hh.MAX_PROMPT_UTF16 + len("正在处理："))
+        self.assertLessEqual(hh.utf16_len(e["prompt"]), hh.MAX_PROMPT_UTF16)
 
     def test_stop_sets_done_with_placeholder(self):
         _write_config()
@@ -327,6 +326,33 @@ class TestSummarize(TmpDataDirTest):
             encoding="utf-8"))["projects"]["demo"]
         self.assertEqual(e["summary"], "（本轮无文本输出）")
 
+    def test_late_summary_discarded_after_new_prompt(self):
+        # 竞态守卫：摘要生成期间用户提交了新指令（占位符已被清空），
+        # 迟到的摘要不得把 running 覆盖回 done
+        _write_config()
+        hh.update_project("demo", {"status": "running", "prompt": "新任务",
+                                   "summary": "", "updated_at": time.time()})
+        p = Path(self._tmp.name) / "t.jsonl"
+        _write_transcript(p, ["上一轮的汇报"])
+        hh.run_summarize("demo", str(p))
+        e = json.loads(hh.state_path().read_text(
+            encoding="utf-8"))["projects"]["demo"]
+        self.assertEqual(e["status"], "running")
+        self.assertEqual(e["summary"], "")
+
+    def test_summary_applies_when_placeholder_present(self):
+        _write_config()
+        hh.update_project("demo", {"status": "done",
+                                   "summary": hh.SUMMARY_PLACEHOLDER,
+                                   "updated_at": time.time()})
+        p = Path(self._tmp.name) / "t.jsonl"
+        _write_transcript(p, ["本轮的汇报"])
+        hh.run_summarize("demo", str(p))
+        e = json.loads(hh.state_path().read_text(
+            encoding="utf-8"))["projects"]["demo"]
+        self.assertEqual(e["status"], "done")
+        self.assertIn("本轮的汇报", e["summary"])
+
 
 class TestSecurity(TmpDataDirTest):
     """state.json 含用户指令原文、push.log 可能含推送负载，均不应对同机他人可读。"""
@@ -402,6 +428,13 @@ class TestRenderStatusBody(unittest.TestCase):
             "status": "done", "prompt": "跑测试", "updated_at": now}}}, now=now)
         self.assertIn("跑测试", out)
         self.assertNotIn("正在处理", out)
+
+    def test_unknown_status_renders_as_stale_not_crash(self):
+        # 手改 state.json 或版本回退可能出现未知状态值，渲染须兜底
+        now = time.time()
+        state = {"projects": {"p": {"status": "weird", "updated_at": now}}}
+        self.assertIn("状态未知", hh.render_content(state, now=now))
+        self.assertIn("状态未知", hh.render_summary(state, now=now))
 
 
 class TestOnDemandPush(TmpDataDirTest):
@@ -491,6 +524,16 @@ class TestOnDemandPush(TmpDataDirTest):
              "/nonexistent.json"],
             capture_output=True, text=True, env=env)
         self.assertEqual(r.returncode, 1)  # --push 失败必须非零，区别于 hook 恒零
+
+    def test_test_push_exit_codes(self):
+        env = os.environ.copy()
+        env["HIBOARD_DRY_RUN"] = "1"
+        cmd = [sys.executable, str(SCRIPTS / "hiboard_hook.py"), "--test-push"]
+        r = subprocess.run(cmd, capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 1)  # 无配置：失败须非零（与 --push 同哲学）
+        _write_config()
+        r = subprocess.run(cmd, capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0)
 
 
 if __name__ == "__main__":
