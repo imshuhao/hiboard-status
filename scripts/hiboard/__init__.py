@@ -1,0 +1,23 @@
+"""hiboard-status 公共 API 门面。
+
+`import hiboard as hh` 即可访问全部公共名；子模块经 hh.push / hh.store 等可达
+（测试 mock 用）。入口脚本 scripts/hiboard_hook.py 只 import 本门面。
+"""
+
+from . import const, events, ondemand, push, render, store, summarize, text  # noqa: F401
+from .const import (CARD_ID, MAX_CARD_UTF16, MAX_LAST_SUMMARY_UTF16,  # noqa: F401
+                    MAX_PROJECT_UTF16, MAX_PROMPT_UTF16, PRUNE_SECS,
+                    STALE_SECS, SUMMARY_PLACEHOLDER, VERSION)
+from .events import handle_event, project_name, resolve_project, spawn_summarizer  # noqa: F401
+from .ondemand import cmd_push, cmd_test_push  # noqa: F401
+from .push import (CP_HINTS, ERR_HINTS, do_push, load_config,  # noqa: F401
+                   next_midnight, push_card)
+from .render import (STATUS_META, effective_status, fmt_time,  # noqa: F401
+                     render_content, render_summary)
+from .store import (chmod_600, config_path, data_dir, ensure_dir, log,  # noqa: F401
+                    log_path, mutate_state, state_path, update_project)
+from .summarize import last_assistant_text, llm_summarize, run_summarize  # noqa: F401
+from .text import slugify_ascii, truncate_utf16, utf16_len  # noqa: F401
+
+# 测试与旧代码可能通过 hh.urllib 访问；push 模块内部使用的 urllib 以
+# hh.push.urllib 为准（mock patch 请打到 hiboard.push.urllib.request）

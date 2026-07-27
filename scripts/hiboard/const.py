@@ -1,0 +1,18 @@
+"""全局常量。改动前必读 docs/hiboard-api-spec.md（字段显示映射反直觉）。"""
+
+VERSION = "0.2.6"
+
+DEFAULT_ENDPOINT = ("https://hiboard-claw-drcn.ai.dbankcloud.cn"
+                    "/distribution/message/cloud/claw/msg/upload")
+CARD_ID = "claude_code_status"
+
+# 长度均按 UTF-16 码元计（服务端 Java String.length 语义，emoji 计 2）
+MAX_CARD_UTF16 = 28000        # 正文总量（服务端上限 30720，留余量）
+MAX_PROJECT_UTF16 = 3000      # 单项目正文预算（「上轮」行另计 ~300）
+MAX_PROMPT_UTF16 = 60
+MAX_LAST_SUMMARY_UTF16 = 300  # 「↳ 上轮」行
+
+STALE_SECS = 2 * 3600         # running/waiting 超过此时长降级为「状态未知」
+PRUNE_SECS = 7 * 24 * 3600    # 项目条目与 session 映射的保留期
+
+SUMMARY_PLACEHOLDER = "（摘要生成中…）"
