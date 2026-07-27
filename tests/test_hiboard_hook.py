@@ -240,9 +240,44 @@ class TestDispatch(TmpDataDirTest):
 
     def test_session_end_sets_ended(self):
         _write_config()
+        _run_hook({"hook_event_name": "SessionStart", "session_id": "s1",
+                   "cwd": "/tmp/myproj"})
         _run_hook({"hook_event_name": "SessionEnd", "session_id": "s1",
                    "cwd": "/tmp/myproj"})
         self.assertEqual(self._state()["projects"]["myproj"]["status"], "ended")
+
+    def test_session_end_from_other_session_is_ignored(self):
+        # 幽灵会话守卫：非记录在案的 session 不得把项目翻成「已结束」
+        _write_config()
+        _run_hook({"hook_event_name": "UserPromptSubmit", "session_id": "s1",
+                   "cwd": "/tmp/myproj", "prompt": "干活"})
+        _run_hook({"hook_event_name": "SessionEnd", "session_id": "ghost",
+                   "cwd": "/tmp/myproj"})
+        self.assertEqual(self._state()["projects"]["myproj"]["status"], "running")
+
+    def test_session_end_unknown_project_creates_nothing(self):
+        _write_config()
+        _run_hook({"hook_event_name": "SessionEnd", "session_id": "ghost",
+                   "cwd": "/tmp/neverseen"})
+        self.assertNotIn("neverseen", self._state()["projects"])
+
+    def test_project_pinned_at_session_start_despite_cd(self):
+        # 归属钉死在启动目录：会话中途 cd 到别的目录，事件仍记到原项目
+        _write_config()
+        _run_hook({"hook_event_name": "SessionStart", "session_id": "s1",
+                   "cwd": "/tmp/projA"})
+        _run_hook({"hook_event_name": "UserPromptSubmit", "session_id": "s1",
+                   "cwd": "/tmp/projB", "prompt": "改代码"})
+        projects = self._state()["projects"]
+        self.assertIn("改代码", projects["projA"]["prompt"])
+        self.assertNotIn("projB", projects)
+
+    def test_unmapped_session_falls_back_to_cwd(self):
+        # 插件启用前已开始的会话没有映射，退回按 cwd 推断
+        _write_config()
+        _run_hook({"hook_event_name": "UserPromptSubmit", "session_id": "old",
+                   "cwd": "/tmp/legacy", "prompt": "继续"})
+        self.assertIn("legacy", self._state()["projects"])
 
     def test_new_prompt_and_session_start_preserve_summary(self):
         # summary 是「最近完成回合的总结」，新指令与新会话都不清空它

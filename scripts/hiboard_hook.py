@@ -191,6 +191,10 @@ def mutate_state(mutator) -> dict:
                 n: e for n, e in state["projects"].items()
                 if now - e.get("updated_at", 0) <= PRUNE_SECS
             }
+            state["sessions"] = {
+                sid: s for sid, s in state.get("sessions", {}).items()
+                if now - s.get("ts", 0) <= PRUNE_SECS
+            }
             tmp = state_path().with_suffix(".json.tmp")
             tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2),
                            encoding="utf-8")
@@ -262,7 +266,7 @@ def push_card(cfg: dict, summary: str, content: str, *,
         data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
         headers={
             "Content-Type": "application/json; charset=utf-8",
-            "User-Agent":   "hiboard-status/0.2.3",
+            "User-Agent":   "hiboard-status/0.2.4",
             "x-trace-id":   f"ccs-{now}-{uuid.uuid4().hex[:8]}",  # 必需，非空即可
         })
     try:
@@ -302,6 +306,23 @@ def do_push(state: dict) -> None:
 
 def project_name(cwd: str) -> str:
     return Path(cwd).name or "unknown" if cwd else "unknown"
+
+
+def resolve_project(state: dict, evt: dict, name: str) -> str:
+    """项目归属钉死在会话启动目录：SessionStart 记录 session→项目映射，
+    后续事件按 session_id 查表——会话中途 cd 不再造成归属漂移。
+    查不到映射（插件启用前已开始的会话）退回按当前 cwd 推断。"""
+    sid = evt.get("session_id", "")
+    sessions = state.setdefault("sessions", {})
+    if name == "SessionStart":
+        proj = project_name(evt.get("cwd", ""))
+        if sid:
+            sessions[sid] = {"proj": proj, "ts": time.time()}
+        return proj
+    if sid and sid in sessions:
+        sessions[sid]["ts"] = time.time()
+        return sessions[sid]["proj"]
+    return project_name(evt.get("cwd", ""))
 
 
 def spawn_summarizer(evt: dict, proj: str, turn_ts: float) -> None:
@@ -403,33 +424,47 @@ def handle_event(evt: dict) -> None:
     if not load_config():
         return  # 未配置即零副作用：不更新状态、不 spawn、不推送（设计 §9）
     name = evt.get("hook_event_name", "")
-    proj = project_name(evt.get("cwd", ""))
-    now = time.time()
-    base = {"session_id": evt.get("session_id", ""),
-            "cwd": evt.get("cwd", ""), "updated_at": now}
-
-    # summary 只有 Stop（占位符）和摘要进程会写，其余事件一律保留——
-    # 它是「最近完成回合的总结」，跨指令、跨会话有效（设计 2026-07-27）
-    if name == "SessionStart":
-        fields = dict(base, status="running", prompt="")
-    elif name == "UserPromptSubmit":
-        p = truncate_utf16(" ".join((evt.get("prompt") or "").split()),
-                           MAX_PROMPT_UTF16)
-        fields = dict(base, status="running", prompt=p)  # 前缀由渲染层按状态添加
-    elif name == "Stop":
-        fields = dict(base, status="done", summary=SUMMARY_PLACEHOLDER,
-                      summary_ts=now)
-    elif name == "Notification":
-        fields = dict(base, status="waiting")
-    elif name == "SessionEnd":
-        fields = dict(base, status="ended")
-    else:
+    if name not in ("SessionStart", "UserPromptSubmit", "Stop",
+                    "Notification", "SessionEnd"):
         return
+    now = time.time()
+    result = {}
 
-    state = update_project(proj, fields)
+    def m(state):
+        proj = resolve_project(state, evt, name)
+        result["proj"] = proj
+        entry = state["projects"].get(proj)
+        base = {"session_id": evt.get("session_id", ""),
+                "cwd": evt.get("cwd", ""), "updated_at": now}
+
+        # summary 只有 Stop（占位符）和摘要进程会写，其余事件一律保留——
+        # 它是「最近完成回合的总结」，跨指令、跨会话有效（设计 2026-07-27）
+        if name == "SessionStart":
+            fields = dict(base, status="running", prompt="")
+        elif name == "UserPromptSubmit":
+            p = truncate_utf16(" ".join((evt.get("prompt") or "").split()),
+                               MAX_PROMPT_UTF16)
+            fields = dict(base, status="running", prompt=p)  # 前缀由渲染层按状态添加
+        elif name == "Stop":
+            fields = dict(base, status="done", summary=SUMMARY_PLACEHOLDER,
+                          summary_ts=now)
+        elif name == "Notification":
+            fields = dict(base, status="waiting")
+        else:  # SessionEnd 守卫：只有记录在案的会话能把项目翻成「已结束」，
+            # 桌面 App 回收进程产生的幽灵会话不得覆盖正主的状态
+            if entry is None or (entry.get("session_id")
+                                 and entry["session_id"] != base["session_id"]):
+                result["skip"] = True
+                return
+            fields = dict(base, status="ended")
+        state["projects"].setdefault(proj, {}).update(fields)
+
+    state = mutate_state(m)
+    if result.get("skip"):
+        return
     do_push(state)
     if name == "Stop":
-        spawn_summarizer(evt, proj, now)
+        spawn_summarizer(evt, result["proj"], now)
 
 
 # ---------------------------------------------------------------- 按需推送
