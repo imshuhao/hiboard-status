@@ -6,13 +6,23 @@ import sys
 import time
 from pathlib import Path
 
-from .const import MAX_PROMPT_UTF16, SUMMARY_PLACEHOLDER
+from .const import (DEBOUNCE_SECS, FLUSH_CLAIM_SECS, MAX_PROMPT_UTF16,
+                    SUMMARY_PLACEHOLDER)
 from .push import do_push, load_config
 from .store import mutate_state
 from .text import truncate_utf16
 
 # 自我重启必须指回入口脚本（本模块的 __file__ 不可执行为 hook 入口）
 ENTRY = Path(__file__).resolve().parent.parent / "hiboard_hook.py"
+
+
+def _spawn_detached(cmd) -> None:
+    kw = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if os.name == "posix":
+        kw["start_new_session"] = True
+    else:  # Windows：DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+        kw["creationflags"] = 0x00000008 | 0x00000200
+    subprocess.Popen(cmd, **kw)
 
 
 def project_name(cwd: str) -> str:
@@ -39,11 +49,33 @@ def resolve_project(state: dict, evt: dict, name: str) -> str:
 def spawn_summarizer(evt: dict, proj: str, turn_ts: float) -> None:
     if os.environ.get("HIBOARD_NO_SUMMARY"):
         return
-    subprocess.Popen(
-        [sys.executable, str(ENTRY), "--summarize", proj,
-         evt.get("transcript_path", "") or "", str(turn_ts)],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        start_new_session=True)
+    _spawn_detached([sys.executable, str(ENTRY), "--summarize", proj,
+                     evt.get("transcript_path", "") or "", str(turn_ts)])
+
+
+def request_push() -> None:
+    """hook 路径的推送请求：不在 hook 进程里做网络 IO。
+
+    锁内认领 flush_claim（过期自愈），认领成功才拉起分离的 --flush 进程；
+    合并窗口内的连发事件由同一个 flusher 一次推完。HIBOARD_NO_FLUSH=1
+    退回同步推送（测试与逃生门）。"""
+    if os.environ.get("HIBOARD_NO_FLUSH"):
+        do_push()
+        return
+    claimed = []
+
+    def claim(state):
+        c = state.get("flush_claim") or {}
+        if time.time() - c.get("ts", 0) < FLUSH_CLAIM_SECS:
+            return  # 已有 flusher 在途，它会带上本次变更
+        state["flush_claim"] = {"ts": time.time()}
+        claimed.append(True)
+
+    mutate_state(claim)
+    if claimed:
+        cfg = load_config() or {}
+        _spawn_detached([sys.executable, str(ENTRY), "--flush",
+                         str(cfg.get("pushDebounce", DEBOUNCE_SECS))])
 
 
 def handle_event(evt: dict) -> None:
@@ -100,6 +132,6 @@ def handle_event(evt: dict) -> None:
         # 截断降级路径）；每回合配额消耗从 ~3 次降到 ~2 次
         spawn_summarizer(evt, result["proj"], now)
         return
-    do_push()
+    request_push()
     if name == "Stop":
         spawn_summarizer(evt, result["proj"], now)

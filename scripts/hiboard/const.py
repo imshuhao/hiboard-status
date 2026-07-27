@@ -1,6 +1,6 @@
 """全局常量。改动前必读 docs/hiboard-api-spec.md（字段显示映射反直觉）。"""
 
-VERSION = "0.2.6"
+VERSION = "0.3.0"
 
 DEFAULT_ENDPOINT = ("https://hiboard-claw-drcn.ai.dbankcloud.cn"
                     "/distribution/message/cloud/claw/msg/upload")
@@ -16,3 +16,7 @@ STALE_SECS = 2 * 3600         # running/waiting 超过此时长降级为「状�
 PRUNE_SECS = 7 * 24 * 3600    # 项目条目与 session 映射的保留期
 
 SUMMARY_PLACEHOLDER = "（摘要生成中…）"
+
+DEBOUNCE_SECS = 3          # 后台推送合并窗口（配置 pushDebounce 可覆盖）
+FLUSH_CLAIM_SECS = 45      # flusher 认领过期时间（进程被杀不至于永久卡住）
+SUMMARY_MIN_UTF16 = 120    # 回复不超过此长度视为琐碎回合，原文即摘要不起 LLM

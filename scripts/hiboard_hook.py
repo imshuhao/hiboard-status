@@ -12,7 +12,8 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from hiboard import cmd_push, cmd_test_push, handle_event, log, run_summarize  # noqa: E402
+from hiboard import (cmd_push, cmd_status, cmd_test_push, handle_event,  # noqa: E402
+                     log, run_flush, run_summarize)
 
 
 def main(argv) -> int:
@@ -26,10 +27,18 @@ def main(argv) -> int:
         except Exception as e:
             print(f"推送异常: {type(e).__name__}: {e}")
             return 1
+    if mode == "--status":
+        try:
+            return cmd_status()
+        except Exception as e:
+            print(f"状态读取异常: {type(e).__name__}: {e}")
+            return 0
     try:
         if mode == "--summarize":
             run_summarize(argv[2], argv[3] if len(argv) > 3 else "",
                           float(argv[4]) if len(argv) > 4 else 0.0)
+        elif mode == "--flush":
+            run_flush(float(argv[2]) if len(argv) > 2 else 0.0)
         else:
             if os.environ.get("HIBOARD_SUMMARIZING"):
                 return 0  # 摘要无头会话触发的 hooks：直接忽略，防无限递归

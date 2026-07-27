@@ -154,5 +154,44 @@ class TestEntryPath(unittest.TestCase):
         self.assertTrue(ENTRY.exists())
 
 
+class TestRequestPush(TmpDataDirTest):
+    """后台推送调度：认领去重，一个合并窗口只起一个 flusher。"""
+
+    def test_flusher_spawned_once_per_window(self):
+        from unittest import mock
+        _write_config()
+        with mock.patch.object(hh.events.subprocess, "Popen") as popen:
+            hh.request_push()
+            hh.request_push()  # 认领仍在，有 flusher 在途，不重复 spawn
+        self.assertEqual(popen.call_count, 1)
+        self.assertIn("flush_claim", read_state())
+        args = popen.call_args[0][0]
+        self.assertIn("--flush", args)
+
+    def test_expired_claim_allows_new_flusher(self):
+        from unittest import mock
+        _write_config()
+        hh.mutate_state(lambda s: s.update(
+            {"flush_claim": {"ts": 0}}))  # 早已过期（进程被杀场景）
+        with mock.patch.object(hh.events.subprocess, "Popen") as popen:
+            hh.request_push()
+        self.assertEqual(popen.call_count, 1)
+
+    def test_no_flush_env_pushes_synchronously(self):
+        import os
+        _write_config()
+        hh.update_project("p", {"status": "done", "summary": "x",
+                                "updated_at": __import__("time").time()})
+        os.environ["HIBOARD_NO_FLUSH"] = "1"
+        os.environ["HIBOARD_DRY_RUN"] = "1"
+        try:
+            hh.request_push()
+        finally:
+            os.environ.pop("HIBOARD_NO_FLUSH", None)
+            os.environ.pop("HIBOARD_DRY_RUN", None)
+        self.assertIn("DRY_RUN", hh.log_path().read_text(encoding="utf-8"))
+        self.assertNotIn("flush_claim", read_state())
+
+
 if __name__ == "__main__":
     unittest.main()

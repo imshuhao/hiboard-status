@@ -12,6 +12,7 @@ from datetime import datetime
 from .const import CARD_ID, DEFAULT_ENDPOINT, VERSION
 from .render import render_content, render_summary
 from .store import config_path, log, log_path, mutate_state
+from .text import slugify_ascii
 
 ERR_HINTS = {
     "0000900034": "授权码无效或未关联，请到负一屏重新获取",
@@ -36,6 +37,13 @@ def load_config():
     if not cfg.get("authCode"):
         return None
     return cfg
+
+
+def status_card_id(cfg: dict) -> str:
+    """状态卡 ID。多机同账号时配置 cardSuffix（如 hostname）各机各卡；
+    默认空保持既有卡片不变。"""
+    sfx = (cfg.get("cardSuffix") or "").strip()
+    return CARD_ID + (f"_{slugify_ascii(sfx)}" if sfx else "")
 
 
 def next_midnight() -> float:
@@ -129,12 +137,25 @@ def do_push() -> None:
     mutate_state(claim)
     if not payload:
         return
-    ok = push_card(cfg, payload["summary"], payload["content"], timeout=6)
+    ok = push_card(cfg, payload["summary"], payload["content"],
+                   card_id=status_card_id(cfg), timeout=6)
 
     def finish(state):
         if (state.get("push_claim") or {}).get("digest") == payload["digest"]:
             state.pop("push_claim", None)
         if ok:
             state["last_push_hash"] = payload["digest"]
+            state["last_push_ts"] = time.time()
 
     mutate_state(finish)
+
+
+def run_flush(debounce: float) -> None:
+    """--flush 子模式：合并窗口后统一推送（由 request_push 拉起的分离进程）。
+
+    先清认领再推送：推送期间到达的新事件会拉起新 flusher，不丢任何更新；
+    窗口内的连发事件在 do_push 锁内渲染时自然合并为一次推送。"""
+    if debounce > 0:
+        time.sleep(debounce)
+    mutate_state(lambda s: s.pop("flush_claim", None))
+    do_push()

@@ -74,6 +74,15 @@ class TestRenderStatusBody(unittest.TestCase):
             "status": "running", "prompt": "跑测试", "updated_at": now}}}, now=now)
         self.assertIn("正在处理：跑测试", out)
 
+    def test_running_timestamp_shows_since(self):
+        # 运行时长感：running/waiting 时间戳带「自」前缀，done 不带
+        now = time.time()
+        out = hh.render_content({"projects": {
+            "a": {"status": "running", "prompt": "x", "updated_at": now},
+            "b": {"status": "done", "summary": "y", "updated_at": now},
+        }}, now=now)
+        self.assertEqual(out.count("`自 "), 1)
+
     def test_ended_hides_prompt(self):
         now = time.time()
         out = hh.render_content({"projects": {"p": {

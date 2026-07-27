@@ -54,6 +54,8 @@ def render_content(state: dict, now=None) -> str:
             body += ("  \n" if body else "") + "↳ 上轮：" + \
                 truncate_utf16(summary, MAX_LAST_SUMMARY_UTF16)
         ts = fmt_time(e.get("updated_at", now), now=now)
+        if st in ("running", "waiting"):
+            ts = f"自 {ts}"  # 运行时长感：静态文本，无需定时刷新
         sections.append(f"## {emoji} {name} — {label}\n`{ts}` {body}".rstrip())
     content = "\n\n---\n\n".join(sections) or "_暂无会话_"
     return truncate_utf16(content, MAX_CARD_UTF16)

@@ -98,6 +98,18 @@ class TestOnDemandPush(TmpDataDirTest):
         if hh.state_path().exists():
             self.assertNotIn("manual_slots", read_state())
 
+    def test_topic_push_registers_in_state(self):
+        # 主题卡登记簿：永久卡无删除接口，state.topics 记录名下有哪些
+        _write_config()
+        for _ in range(2):
+            hh.cmd_push(self._push_file(summary="日报", content="c",
+                                        topic="每日日报"))
+        topics = read_state()["topics"]
+        self.assertEqual(len(topics), 1)
+        entry = next(iter(topics.values()))
+        self.assertEqual(entry["topic"], "每日日报")
+        self.assertEqual(entry["count"], 2)
+
     def test_push_custom_fields_land_in_payload(self):
         _write_config()
         hh.cmd_push(self._push_file(summary="标题", content="c",

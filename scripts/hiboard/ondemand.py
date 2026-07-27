@@ -7,8 +7,8 @@ import json
 import time
 from pathlib import Path
 
-from .const import CARD_ID, MAX_CARD_UTF16
-from .push import load_config, push_card
+from .const import MAX_CARD_UTF16
+from .push import load_config, push_card, status_card_id
 from .store import log_path, mutate_state
 from .text import slugify_ascii, truncate_utf16, utf16_len
 
@@ -62,6 +62,15 @@ def cmd_push(path: str) -> int:
                    result=(data.get("result") or "推送完成").strip(),
                    task_name="Claude Code Push")
     if ok:
+        if topic:
+            # 主题卡登记簿：永久卡无删除接口，记下名下有哪些（--status 可查）
+            def register(state):
+                t = state.setdefault("topics", {}).setdefault(
+                    card_id, {"topic": topic, "count": 0})
+                t.update(topic=topic, ts=time.time(),
+                         count=t.get("count", 0) + 1)
+
+            mutate_state(register)
         print(f"推送成功（卡片 {card_id}）")
         return 0
     if not topic:
@@ -89,7 +98,7 @@ def cmd_test_push() -> int:
         return 1
     ok = push_card(cfg, "hiboard-status 配置成功 ✅",
                    "# 配置成功\n\nClaude Code 会话状态将推送到这张卡片。",
-                   card_id=CARD_ID)
+                   card_id=status_card_id(cfg))
     print("推送成功，请到负一屏查看" if ok else
           f"推送失败，详见 {log_path()}")
     return 0 if ok else 1

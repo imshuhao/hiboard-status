@@ -93,6 +93,41 @@ class TestSummarize(TmpDataDirTest):
         self.assertEqual(read_state()["projects"]["demo"]["summary"],
                          "新回合摘要")
 
+    def test_last_turn_extracts_user_prompt(self):
+        p = Path(self._tmp.name) / "t.jsonl"
+        _write_transcript(p, ["第一轮回复", "第二轮回复"])
+        user, assistant = hh.last_turn(str(p))
+        self.assertEqual(user, "q")  # helpers 转录里的用户消息文本
+        self.assertEqual(assistant, "第二轮回复")
+
+    def test_trivial_turn_skips_llm(self):
+        # 回复低于 summaryMinChars：原文即摘要，绝不调 LLM
+        from unittest import mock
+        _write_config()
+        hh.update_project("demo", {"status": "done",
+                                   "summary": hh.SUMMARY_PLACEHOLDER,
+                                   "updated_at": time.time()})
+        p = Path(self._tmp.name) / "t.jsonl"
+        _write_transcript(p, ["改好了，测试通过。"])
+        with mock.patch.object(hh.summarize, "llm_summarize",
+                               side_effect=AssertionError("不应调用 LLM")):
+            hh.run_summarize("demo", str(p), time.time())
+        self.assertIn("改好了", read_state()["projects"]["demo"]["summary"])
+
+    def test_long_turn_passes_user_context_to_llm(self):
+        from unittest import mock
+        _write_config()
+        hh.update_project("demo", {"status": "done",
+                                   "summary": hh.SUMMARY_PLACEHOLDER,
+                                   "updated_at": time.time()})
+        p = Path(self._tmp.name) / "t.jsonl"
+        _write_transcript(p, ["很长的汇报" * 100])
+        with mock.patch.object(hh.summarize, "llm_summarize",
+                               return_value="LLM摘要") as m:
+            hh.run_summarize("demo", str(p), time.time())
+        self.assertEqual(m.call_args.kwargs.get("user_prompt"), "q")
+        self.assertEqual(read_state()["projects"]["demo"]["summary"], "LLM摘要")
+
     def test_summary_newlines_collapsed(self):
         # 转录原文含换行时不得伪造卡片分节
         _write_config()

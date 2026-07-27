@@ -43,6 +43,7 @@ def _run_hook(evt: dict, extra_env=None) -> subprocess.CompletedProcess:
     env = os.environ.copy()
     env["HIBOARD_DRY_RUN"] = "1"
     env["HIBOARD_NO_SUMMARY"] = "1"  # 分发测试不真起后台摘要进程
+    env["HIBOARD_NO_FLUSH"] = "1"    # 分发测试同步推送，不起 flusher
     env.update(extra_env or {})
     return subprocess.run(
         [sys.executable, str(ENTRY)],

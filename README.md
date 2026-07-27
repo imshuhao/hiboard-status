@@ -4,7 +4,8 @@
 回合结束后看到 AI 生成的工作摘要。
 
 > **硬件门槛：需要华为手机 + 负一屏（HiBoard）。** 其他设备无法使用本插件。
-> 运行 Claude Code 的主机需为 macOS/Linux（hook 脚本依赖 POSIX 文件锁）。
+> 主机 macOS/Linux 完整支持；Windows 做了兼容处理但未经真机验证，
+> 且需保证 `python3` 在 PATH 中。
 
 ## 效果
 
@@ -62,8 +63,20 @@
 | `pushServiceUrl` | 华为官方端点 | 一般无需改动 |
 | `summaryModel` | `haiku` | 生成回合摘要的模型 |
 | `summaryTimeout` | `30` | 摘要生成超时（秒），超时降级为截断 |
+| `summaryMinChars` | `120` | 回复不超过此长度（UTF-16 码元）时原文即摘要，不调 LLM |
 | `manualSlots` | `3` | 按需推送的轮转卡位数量 |
+| `pushDebounce` | `3` | 状态推送合并窗口（秒），连发事件只推最终状态 |
+| `cardSuffix` | 空 | 多台电脑共用一个华为账号时设为各机标识（如 hostname），各机各卡 |
 | `enabled` | `true` | 全局开关 |
+
+## 诊断
+
+```bash
+python3 ~/.claude/plugins/marketplaces/imshuhao/scripts/hiboard_hook.py --status
+```
+
+一条命令查看：配置状态、配额熔断、各项目状态、名下的永久主题卡、
+轮转卡位与今日推送失败数。
 
 ## 上游 API
 

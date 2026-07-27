@@ -4,7 +4,6 @@ state/log 含用户指令原文，权限一律 600/700。
 mutate_state 是唯一的状态写入通道：flock 串行化 + 原子写回 + 过期清理。
 """
 
-import fcntl
 import json
 import os
 import time
@@ -12,6 +11,28 @@ from datetime import datetime
 from pathlib import Path
 
 from .const import PRUNE_SECS
+
+try:
+    import fcntl
+
+    def _lock(f):
+        fcntl.flock(f, fcntl.LOCK_EX)
+
+    def _unlock(f):
+        fcntl.flock(f, fcntl.LOCK_UN)
+except ImportError:  # Windows（尽力而为，未经真机验证）
+    import msvcrt
+
+    def _lock(f):
+        f.seek(0)
+        msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+
+    def _unlock(f):
+        try:
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
 
 
 def data_dir() -> Path:
@@ -71,7 +92,7 @@ def mutate_state(mutator) -> dict:
     """flock 串行化：加载 → mutator 就地修改 → 清理过期 → 原子写回。"""
     ensure_dir()
     with open(data_dir() / ".lock", "w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        _lock(lock)
         try:
             try:
                 state = json.loads(state_path().read_text(encoding="utf-8"))
@@ -101,7 +122,7 @@ def mutate_state(mutator) -> dict:
             tmp.rename(state_path())
             return state
         finally:
-            fcntl.flock(lock, fcntl.LOCK_UN)
+            _unlock(lock)
 
 
 def update_project(proj: str, fields: dict) -> dict:

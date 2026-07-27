@@ -82,6 +82,30 @@ class TestDoPush(TmpDataDirTest):
         state = read_state()
         self.assertNotIn("push_claim", state)
         self.assertIn("last_push_hash", state)
+        self.assertGreater(state.get("last_push_ts", 0), time.time() - 5)
+
+    def test_card_suffix_changes_status_card_id(self):
+        _write_config(cardSuffix="Mac Mini")
+        hh.update_project("p", {"status": "done", "summary": "x",
+                                "updated_at": time.time()})
+        hh.do_push()
+        logtext = hh.log_path().read_text(encoding="utf-8")
+        self.assertIn('"scheduleTaskId": "claude_code_status_mac_mini"',
+                      logtext)
+
+    def test_default_card_id_unchanged_without_suffix(self):
+        self.assertEqual(hh.status_card_id({}), hh.CARD_ID)
+
+    def test_run_flush_pushes_and_clears_claim(self):
+        _write_config()
+        hh.update_project("p", {"status": "done", "summary": "x",
+                                "updated_at": time.time()})
+        hh.mutate_state(lambda s: s.update(
+            {"flush_claim": {"ts": time.time()}}))
+        hh.run_flush(0)
+        state = read_state()
+        self.assertNotIn("flush_claim", state)
+        self.assertIn("DRY_RUN", hh.log_path().read_text(encoding="utf-8"))
 
 
 class TestQuotaBreaker(TmpDataDirTest):

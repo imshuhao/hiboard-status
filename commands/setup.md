@@ -40,7 +40,8 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/hiboard_hook.py" --test-push
 ```
 
 - 成功：让用户在负一屏确认出现「配置成功」卡片，配置完成。
-- 失败：读 `~/.claude/hiboard/push.log` 最后几行。常见错误：
+- 失败：先跑 `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/hiboard_hook.py" --status`
+  看整体状态，再读 `~/.claude/hiboard/push.log` 最后几行。常见错误：
   - `0000900034` 授权码无效 → 回到第 2 步重新获取
   - `82600013` 推送开关关闭 → 负一屏 → 动态管理 → AI 任务完成通知 → 开启两个开关
   - `82600017` 手机未联网或未登录华为账号
