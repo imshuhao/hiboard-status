@@ -1,9 +1,14 @@
-"""状态卡渲染。字段显示映射反直觉（summary=列表标题），见 api-spec §6.2。"""
+"""状态卡渲染。字段显示映射反直觉（summary=列表标题），见 api-spec §6.2。
+
+格子模型：每项目分行展示各会话格子（≤MAX_CELLS_RENDER），头部状态按
+waiting > running > done 取最高优先——「有会话在等你」比「有会话在跑」
+更需要被一眼看见。无 cells 的旧扁平条目走 legacy 路径，7 天自然淘汰。
+"""
 
 import time
 from datetime import datetime
 
-from .const import (MAX_CARD_UTF16, MAX_LAST_SUMMARY_UTF16,
+from .const import (MAX_CARD_UTF16, MAX_CELLS_RENDER, MAX_LAST_SUMMARY_UTF16,
                     MAX_PROJECT_UTF16, STALE_SECS)
 from .text import truncate_utf16
 
@@ -14,6 +19,7 @@ STATUS_META = {
     "ended":   ("⚪", "已结束"),
     "stale":   ("⚪", "状态未知"),
 }
+_CELL_PRIORITY = {"waiting": 0, "running": 1, "done": 2}
 
 
 def fmt_time(ts: float, now=None) -> str:
@@ -23,11 +29,62 @@ def fmt_time(ts: float, now=None) -> str:
 
 
 def effective_status(entry: dict, now=None) -> str:
+    """legacy 扁平条目的状态（无 cells 的旧数据）。"""
     now = time.time() if now is None else now
     st = entry.get("status", "ended")
     if st in ("running", "waiting") and now - entry.get("updated_at", 0) > STALE_SECS:
         return "stale"
     return st
+
+
+def live_cells(entry: dict, now=None):
+    """按优先级+新近排序的活格子 [(sid, cell)]；stale 格子不渲染。"""
+    now = time.time() if now is None else now
+    cells = entry.get("cells") or {}
+    fresh = [(sid, c) for sid, c in cells.items()
+             if now - c.get("updated_at", 0) <= STALE_SECS
+             and c.get("status") in _CELL_PRIORITY]
+    fresh.sort(key=lambda kv: (_CELL_PRIORITY[kv[1]["status"]],
+                               -kv[1].get("updated_at", 0)))
+    return fresh
+
+
+def display_status(entry: dict, now=None) -> str:
+    """项目展示状态：活格子最高优先；无活格 → legacy 或已结束。"""
+    now = time.time() if now is None else now
+    if "cells" in entry:
+        cells = live_cells(entry, now)
+        return cells[0][1]["status"] if cells else "ended"
+    return effective_status(entry, now)
+
+
+def _cell_line(cell: dict, entry: dict, single: bool, now) -> str:
+    st = cell["status"]
+    ts = fmt_time(cell.get("updated_at", now), now=now)
+    prompt = cell.get("prompt") or ""
+    if st == "running":
+        txt = f"正在处理：{prompt}" if prompt else ""
+        ts = f"自 {ts}"
+    elif st == "waiting":
+        txt = prompt
+        ts = f"自 {ts}"
+    else:  # done：单格时项目摘要即正文（与单会话时代一致），多格只标指令
+        txt = (entry.get("summary") or prompt) if single else \
+            (prompt or "本轮完成")
+    emoji = "" if single else STATUS_META[st][0] + " "
+    return f"`{ts}` {emoji}{txt}".rstrip()
+
+
+def _legacy_body(entry: dict, st: str) -> str:
+    prompt = entry.get("prompt") or ""
+    summary = entry.get("summary") or ""
+    if st == "running":
+        return f"正在处理：{prompt}" if prompt else ""
+    if st == "waiting":
+        return prompt
+    if st == "done":
+        return summary or prompt
+    return summary  # ended / stale
 
 
 def render_content(state: dict, now=None) -> str:
@@ -36,29 +93,40 @@ def render_content(state: dict, now=None) -> str:
                    key=lambda kv: kv[1].get("updated_at", 0), reverse=True)
     sections = []
     for name, e in items:
-        st = effective_status(e, now)
+        st = display_status(e, now)
         emoji, label = STATUS_META.get(st, STATUS_META["stale"])
-        prompt = e.get("prompt") or ""
-        summary = e.get("summary") or ""  # 语义：最近一个已完成回合的总结
-        if st == "running":
-            body = f"正在处理：{prompt}" if prompt else ""
-        elif st == "waiting":
-            body = prompt
-        elif st == "done":
-            body = summary or prompt
-        else:  # ended / stale：不再展示「正在处理」类瞬时信息
-            body = summary
+        summary = e.get("summary") or ""
+        if "cells" in e:
+            cells = live_cells(e, now)
+            if len(cells) > 1:
+                label = f"{len(cells)} 个会话"
+            lines = [_cell_line(c, e, len(cells) == 1, now)
+                     for _, c in cells[:MAX_CELLS_RENDER]]
+            if not lines:  # 无活格：有摘要显示摘要（已结束），否则仅标题行
+                ts = fmt_time(e.get("updated_at", now), now=now)
+                lines = [f"`{ts}` {summary}".rstrip()] if summary else []
+            body = "  \n".join(lines)
+        else:  # legacy 扁平条目
+            ts = fmt_time(e.get("updated_at", now), now=now)
+            if st in ("running", "waiting"):
+                ts = f"自 {ts}"
+            body = f"`{ts}` " + _legacy_body(e, st)
+            body = body.rstrip()
         body = truncate_utf16(body, MAX_PROJECT_UTF16)
         if st in ("running", "waiting") and summary:
             # 硬换行（行尾两空格）；渲染器不支持时降级为同行显示，仍可读
             body += ("  \n" if body else "") + "↳ 上轮：" + \
                 truncate_utf16(summary, MAX_LAST_SUMMARY_UTF16)
-        ts = fmt_time(e.get("updated_at", now), now=now)
-        if st in ("running", "waiting"):
-            ts = f"自 {ts}"  # 运行时长感：静态文本，无需定时刷新
-        sections.append(f"## {emoji} {name} — {label}\n`{ts}` {body}".rstrip())
+        sections.append(f"## {emoji} {name} — {label}\n{body}".rstrip())
     content = "\n\n---\n\n".join(sections) or "_暂无会话_"
     return truncate_utf16(content, MAX_CARD_UTF16)
+
+
+def _running_count(entry: dict, now) -> int:
+    if "cells" in entry:
+        return sum(1 for _, c in live_cells(entry, now)
+                   if c["status"] == "running")
+    return 1 if effective_status(entry, now) == "running" else 0
 
 
 def render_summary(state: dict, now=None) -> str:
@@ -67,11 +135,10 @@ def render_summary(state: dict, now=None) -> str:
     projects = state.get("projects", {})
     if not projects:
         return "Claude Code"
-    running = sum(1 for e in projects.values()
-                  if effective_status(e, now) == "running")
+    running = sum(_running_count(e, now) for e in projects.values())
     name, latest = max(projects.items(),
                        key=lambda kv: kv[1].get("updated_at", 0))
-    _, label = STATUS_META.get(effective_status(latest, now),
+    _, label = STATUS_META.get(display_status(latest, now),
                                STATUS_META["stale"])
     parts = ([f"{running} 个会话运行中"] if running else []) + [f"{name} {label}"]
     return truncate_utf16(" · ".join(parts), 60)

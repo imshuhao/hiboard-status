@@ -35,8 +35,13 @@ def main(argv) -> int:
             return 0
     try:
         if mode == "--summarize":
-            run_summarize(argv[2], argv[3] if len(argv) > 3 else "",
-                          float(argv[4]) if len(argv) > 4 else 0.0)
+            # argv: <proj> <turn_ts> <user_prompt> [transcript_path]；
+            # 正文经 stdin 传入（父进程写完即关，EOF 立即返回）
+            run_summarize(argv[2],
+                          float(argv[3]) if len(argv) > 3 else 0.0,
+                          argv[4] if len(argv) > 4 else "",
+                          argv[5] if len(argv) > 5 else "",
+                          sys.stdin.read() if not sys.stdin.isatty() else "")
         elif mode == "--flush":
             run_flush(float(argv[2]) if len(argv) > 2 else 0.0)
         else:

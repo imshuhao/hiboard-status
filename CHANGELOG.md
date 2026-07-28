@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.0 · 2026-07-28
+
+- **同目录多会话**：项目条目内按 session_id 分格子记录状态，卡片分行展示
+  （≤3 行，🟡 等待 > 🟢 运行 > ✅ 完成 优先级聚合）——A 在跑时 B 的完成
+  不再把项目错标成「本轮完成」
+- 格子生于首次指令、死于 SessionEnd/超龄；幽灵会话彻底隐形，
+  v0.2.4/0.2.5 的 ownership 守卫退役
+- `~/.claude/sessions` 活会话注册表 best-effort 清理已死会话的格子
+- 摘要正文改用 Stop 载荷的 `last_assistant_message`（transcript 解析降为
+  旧版 fallback）；`claude -p` 加 `--bare --no-session-persistence`
+  （不再残留假 transcript、结构性防递归），旧版 CLI 自动去 flag 重试
+- 旧扁平 state 条目按 legacy 路径渲染，平滑过渡
+
 ## 0.3.0 · 2026-07-27
 
 - **后台推送 + 事件合并**：hook 不再同步做网络 IO；分离的 flusher 进程在

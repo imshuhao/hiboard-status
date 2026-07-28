@@ -65,8 +65,86 @@ class TestRender(unittest.TestCase):
         self.assertEqual(hh.render_summary({"projects": {}}), "Claude Code")
 
 
+def _cells_entry(summary="", now=None, **cells):
+    now = time.time() if now is None else now
+    return {"cells": {sid: dict(c, updated_at=c.get("updated_at", now))
+                      for sid, c in cells.items()},
+            "summary": summary, "updated_at": now}
+
+
+class TestCellsRender(unittest.TestCase):
+    """格子模型渲染：分行、优先级、legacy 回退。"""
+
+    def test_single_running_cell_matches_classic_format(self):
+        now = time.time()
+        state = {"projects": {"p": _cells_entry(
+            A={"status": "running", "prompt": "修复登录"}, now=now)}}
+        out = hh.render_content(state, now=now)
+        self.assertIn("🟢 p — 运行中", out)
+        self.assertIn("正在处理：修复登录", out)
+        self.assertIn("`自 ", out)
+
+    def test_waiting_outranks_running_in_header(self):
+        now = time.time()
+        state = {"projects": {"p": _cells_entry(
+            A={"status": "running", "prompt": "跑任务"},
+            B={"status": "waiting", "prompt": "要继续吗"}, now=now)}}
+        out = hh.render_content(state, now=now)
+        self.assertIn("🟡 p — 2 个会话", out)
+        # waiting 行排在 running 行前面，多格行首带各自 emoji
+        self.assertLess(out.index("要继续吗"), out.index("跑任务"))
+        self.assertIn("🟡 要继续吗", out)
+        self.assertIn("🟢 正在处理：跑任务", out)
+
+    def test_done_cell_single_shows_project_summary(self):
+        now = time.time()
+        state = {"projects": {"p": _cells_entry(
+            A={"status": "done", "prompt": "旧指令"},
+            summary="完成了重构", now=now)}}
+        out = hh.render_content(state, now=now)
+        self.assertIn("✅ p — 本轮完成", out)
+        self.assertIn("完成了重构", out)
+        self.assertNotIn("上轮", out)  # 摘要即正文，不重复
+
+    def test_no_live_cells_decays_to_ended_with_summary(self):
+        now = time.time()
+        state = {"projects": {"p": _cells_entry(summary="上次的总结", now=now)}}
+        out = hh.render_content(state, now=now)
+        self.assertIn("⚪ p — 已结束", out)
+        self.assertIn("上次的总结", out)
+
+    def test_stale_cell_excluded(self):
+        now = time.time()
+        state = {"projects": {"p": _cells_entry(
+            A={"status": "running", "prompt": "早死了",
+               "updated_at": now - 3 * 3600},
+            summary="留下的总结", now=now)}}
+        out = hh.render_content(state, now=now)
+        self.assertNotIn("早死了", out)
+        self.assertIn("已结束", out)
+
+    def test_last_summary_line_on_running_with_cells(self):
+        now = time.time()
+        state = {"projects": {"p": _cells_entry(
+            A={"status": "running", "prompt": "新任务"},
+            summary="上一轮干了活", now=now)}}
+        out = hh.render_content(state, now=now)
+        self.assertIn("↳ 上轮：上一轮干了活", out)
+
+    def test_render_summary_counts_running_cells_across_projects(self):
+        now = time.time()
+        state = {"projects": {
+            "p1": _cells_entry(A={"status": "running", "prompt": "x"},
+                               B={"status": "running", "prompt": "y"}, now=now),
+            "p2": _cells_entry(C={"status": "waiting", "prompt": "z"},
+                               now=now - 10),
+        }}
+        s = hh.render_summary(state, now=now)
+        self.assertIn("2 个会话运行中", s)
+
+
 class TestRenderStatusBody(unittest.TestCase):
-    """渲染层按状态决定正文：前缀只在 running 出现，ended 不显示瞬时指令。"""
+    """legacy 扁平条目的渲染回退（升级前的旧数据仍需正确显示）。"""
 
     def test_running_prompt_gets_prefix(self):
         now = time.time()

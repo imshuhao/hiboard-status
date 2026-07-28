@@ -55,36 +55,46 @@ def last_assistant_text(transcript_path: str) -> str:
 
 
 def llm_summarize(text: str, cfg: dict, user_prompt: str = ""):
-    """调 claude CLI 生成摘要；任何失败返回 None（触发降级）。"""
+    """调 claude CLI 生成摘要；任何失败返回 None（触发降级）。
+
+    --bare 跳过 hooks/插件加载（结构性防递归 + 提速），--no-session-persistence
+    不留假 transcript；旧版 CLI 不识别这两个 flag 时去 flag 重试一次。
+    HIBOARD_SUMMARIZING 环境守卫保留为双保险。
+    """
     if os.environ.get("HIBOARD_NO_LLM"):
         return None
     prefix = (f"用户的指令是：{truncate_utf16(user_prompt, 500)}\n\n"
               if user_prompt else "")
     prompt = (prefix + "用两三句中文总结这段 AI 助手的工作汇报，"
               "说明做了什么、结果如何。直接输出总结，不要前言：\n\n" + text)
-    try:
-        # HIBOARD_SUMMARIZING 会传导给无头会话触发的本插件 hooks，
-        # 使其直接退出——否则无头会话的 Stop 又会 spawn 摘要，无限递归。
-        r = subprocess.run(
-            ["claude", "-p", "--model", cfg.get("summaryModel", "haiku"),
-             prompt],
-            capture_output=True, text=True,
-            env={**os.environ, "HIBOARD_SUMMARIZING": "1"},
-            timeout=cfg.get("summaryTimeout", 30))
-        out = r.stdout.strip()
-        return out if r.returncode == 0 and out else None
-    except (subprocess.TimeoutExpired, OSError):
-        return None
+    for extra in (["--bare", "--no-session-persistence"], []):
+        try:
+            r = subprocess.run(
+                ["claude", "-p", *extra,
+                 "--model", cfg.get("summaryModel", "haiku"), prompt],
+                capture_output=True, text=True,
+                env={**os.environ, "HIBOARD_SUMMARIZING": "1"},
+                timeout=cfg.get("summaryTimeout", 30))
+            out = r.stdout.strip()
+            if r.returncode == 0 and out:
+                return out
+        except (subprocess.TimeoutExpired, OSError):
+            return None
+    return None
 
 
-def run_summarize(proj: str, transcript_path: str, turn_ts: float) -> None:
+def run_summarize(proj: str, turn_ts: float, user_prompt: str = "",
+                  transcript_path: str = "", text: str = "") -> None:
     """--summarize 子模式：后台生成摘要并二次推送。
 
-    summary 语义为「最近一个已完成回合的总结」，本函数只写 summary/summary_ts，
-    绝不碰 status/prompt/updated_at——写入时机因此永远无害（迟到只是更新
-    running 卡片的「上轮」行）。
+    文本首选 Stop 载荷的 last_assistant_message（经 stdin 传入 text）；
+    载荷缺失（旧版 Claude Code）退回 transcript 解析。summary 语义为
+    「最近一个已完成回合的总结」，本函数只写 summary/summary_ts，
+    绝不碰格子——写入时机因此永远无害（迟到只是更新「上轮」行）。
     """
-    user_prompt, text = last_turn(transcript_path)
+    if not text and transcript_path:
+        tp_user, text = last_turn(transcript_path)
+        user_prompt = user_prompt or tp_user
     summary = None
     if text:
         cfg = load_config() or {}

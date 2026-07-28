@@ -48,7 +48,7 @@ class TestSummarize(TmpDataDirTest):
                                    "updated_at": time.time()})
         p = Path(self._tmp.name) / "t.jsonl"
         _write_transcript(p, ["工作汇报正文" * 200])
-        hh.run_summarize("demo", str(p), time.time())
+        hh.run_summarize("demo", time.time(), "", str(p))
         e = read_state()["projects"]["demo"]
         self.assertNotIn("摘要生成中", e["summary"])
         self.assertLessEqual(hh.utf16_len(e["summary"]), 500)
@@ -58,7 +58,7 @@ class TestSummarize(TmpDataDirTest):
         hh.update_project("demo", {"status": "done",
                                    "summary": hh.SUMMARY_PLACEHOLDER,
                                    "updated_at": time.time()})
-        hh.run_summarize("demo", "/nonexistent/x.jsonl", time.time())
+        hh.run_summarize("demo", time.time(), "", "/nonexistent/x.jsonl")
         self.assertEqual(read_state()["projects"]["demo"]["summary"],
                          "（本轮无文本输出）")
 
@@ -73,7 +73,7 @@ class TestSummarize(TmpDataDirTest):
                                    "updated_at": before})
         p = Path(self._tmp.name) / "t.jsonl"
         _write_transcript(p, ["上一轮的汇报"])
-        hh.run_summarize("demo", str(p), before)
+        hh.run_summarize("demo", before, "", str(p))
         e = read_state()["projects"]["demo"]
         self.assertEqual(e["status"], "running")
         self.assertEqual(e["prompt"], "新任务")
@@ -89,7 +89,7 @@ class TestSummarize(TmpDataDirTest):
                                    "updated_at": newer})
         p = Path(self._tmp.name) / "t.jsonl"
         _write_transcript(p, ["旧回合的汇报"])
-        hh.run_summarize("demo", str(p), newer - 100)
+        hh.run_summarize("demo", newer - 100, "", str(p))
         self.assertEqual(read_state()["projects"]["demo"]["summary"],
                          "新回合摘要")
 
@@ -111,7 +111,7 @@ class TestSummarize(TmpDataDirTest):
         _write_transcript(p, ["改好了，测试通过。"])
         with mock.patch.object(hh.summarize, "llm_summarize",
                                side_effect=AssertionError("不应调用 LLM")):
-            hh.run_summarize("demo", str(p), time.time())
+            hh.run_summarize("demo", time.time(), "", str(p))
         self.assertIn("改好了", read_state()["projects"]["demo"]["summary"])
 
     def test_long_turn_passes_user_context_to_llm(self):
@@ -124,9 +124,44 @@ class TestSummarize(TmpDataDirTest):
         _write_transcript(p, ["很长的汇报" * 100])
         with mock.patch.object(hh.summarize, "llm_summarize",
                                return_value="LLM摘要") as m:
-            hh.run_summarize("demo", str(p), time.time())
+            hh.run_summarize("demo", time.time(), "", str(p))
         self.assertEqual(m.call_args.kwargs.get("user_prompt"), "q")
         self.assertEqual(read_state()["projects"]["demo"]["summary"], "LLM摘要")
+
+    def test_payload_text_bypasses_transcript(self):
+        # v0.4.0：正文经 stdin 传入时完全不读 transcript
+        _write_config()
+        hh.update_project("demo", {"summary": hh.SUMMARY_PLACEHOLDER,
+                                   "updated_at": time.time()})
+        hh.run_summarize("demo", time.time(), "指令", "/nonexistent/x.jsonl",
+                         text="载荷里的汇报正文。")
+        self.assertIn("载荷里的汇报正文",
+                      read_state()["projects"]["demo"]["summary"])
+
+    def test_llm_uses_bare_flags_and_retries_without(self):
+        from unittest import mock
+        os.environ.pop("HIBOARD_NO_LLM", None)  # 本测试要进 LLM 路径
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            r = mock.MagicMock()
+            if "--bare" in cmd:  # 模拟旧版 CLI 不识别 flag
+                r.returncode, r.stdout = 1, ""
+            else:
+                r.returncode, r.stdout = 0, "摘要结果"
+            return r
+
+        try:
+            with mock.patch.object(hh.summarize.subprocess, "run",
+                                   side_effect=fake_run):
+                out = hh.llm_summarize("正文", {})
+        finally:
+            os.environ["HIBOARD_NO_LLM"] = "1"
+        self.assertEqual(out, "摘要结果")
+        self.assertIn("--bare", calls[0])
+        self.assertIn("--no-session-persistence", calls[0])
+        self.assertNotIn("--bare", calls[1])
 
     def test_summary_newlines_collapsed(self):
         # 转录原文含换行时不得伪造卡片分节
@@ -136,7 +171,7 @@ class TestSummarize(TmpDataDirTest):
                                    "updated_at": time.time()})
         p = Path(self._tmp.name) / "t.jsonl"
         _write_transcript(p, ["第一行\n## 伪造标题\n第三行"])
-        hh.run_summarize("demo", str(p), time.time())
+        hh.run_summarize("demo", time.time(), "", str(p))
         self.assertNotIn("\n", read_state()["projects"]["demo"]["summary"])
 
 

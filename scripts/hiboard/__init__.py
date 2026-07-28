@@ -15,8 +15,8 @@ from .events import (handle_event, project_name, request_push,  # noqa: F401
 from .ondemand import cmd_push, cmd_test_push  # noqa: F401
 from .push import (CP_HINTS, ERR_HINTS, do_push, load_config,  # noqa: F401
                    next_midnight, push_card, run_flush, status_card_id)
-from .render import (STATUS_META, effective_status, fmt_time,  # noqa: F401
-                     render_content, render_summary)
+from .render import (STATUS_META, display_status, effective_status,  # noqa: F401
+                     fmt_time, live_cells, render_content, render_summary)
 from .status import cmd_status  # noqa: F401
 from .store import (chmod_600, config_path, data_dir, ensure_dir, log,  # noqa: F401
                     log_path, mutate_state, state_path, update_project)

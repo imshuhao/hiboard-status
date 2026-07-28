@@ -22,9 +22,11 @@ class TmpDataDirTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         os.environ["HIBOARD_DATA_DIR"] = self._tmp.name
+        os.environ["HIBOARD_NO_REGISTRY"] = "1"  # 测试不读真机活会话注册表
 
     def tearDown(self):
         os.environ.pop("HIBOARD_DATA_DIR", None)
+        os.environ.pop("HIBOARD_NO_REGISTRY", None)
         self._tmp.cleanup()
 
 

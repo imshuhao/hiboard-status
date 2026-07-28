@@ -6,7 +6,7 @@ from datetime import datetime
 
 from .const import VERSION
 from .push import load_config, status_card_id
-from .render import STATUS_META, effective_status, fmt_time
+from .render import STATUS_META, display_status, fmt_time, live_cells
 from .store import log_path, state_path
 
 
@@ -55,10 +55,14 @@ def cmd_status() -> int:
         for name, e in sorted(projects.items(),
                               key=lambda kv: kv[1].get("updated_at", 0),
                               reverse=True):
-            st = effective_status(e, now)
+            st = display_status(e, now)
             emoji, label = STATUS_META.get(st, STATUS_META["stale"])
+            cells = live_cells(e, now)
+            if len(cells) > 1:
+                label += f"（{len(cells)} 个会话）"
             ts = fmt_time(e.get("updated_at", now), now=now)
-            snippet = (e.get("prompt") or e.get("summary") or "")[:40]
+            snippet = ((cells[0][1].get("prompt") if cells else "")
+                       or e.get("prompt") or e.get("summary") or "")[:40]
             print(f"  {emoji} {name} — {label} @ {ts}  {snippet}")
     else:
         print("项目：无记录")
