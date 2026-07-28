@@ -28,15 +28,6 @@ def fmt_time(ts: float, now=None) -> str:
     return dt.strftime("%m-%d %H:%M") if now - ts >= 86400 else dt.strftime("%H:%M")
 
 
-def effective_status(entry: dict, now=None) -> str:
-    """legacy 扁平条目的状态（无 cells 的旧数据）。"""
-    now = time.time() if now is None else now
-    st = entry.get("status", "ended")
-    if st in ("running", "waiting") and now - entry.get("updated_at", 0) > STALE_SECS:
-        return "stale"
-    return st
-
-
 def live_cells(entry: dict, now=None):
     """按优先级+新近排序的活格子 [(sid, cell)]；stale 格子不渲染。"""
     now = time.time() if now is None else now
@@ -50,12 +41,9 @@ def live_cells(entry: dict, now=None):
 
 
 def display_status(entry: dict, now=None) -> str:
-    """项目展示状态：活格子最高优先；无活格 → legacy 或已结束。"""
-    now = time.time() if now is None else now
-    if "cells" in entry:
-        cells = live_cells(entry, now)
-        return cells[0][1]["status"] if cells else "ended"
-    return effective_status(entry, now)
+    """项目展示状态：活格子最高优先；无活格即「已结束」。"""
+    cells = live_cells(entry, now)
+    return cells[0][1]["status"] if cells else "ended"
 
 
 def _cell_line(cell: dict, entry: dict, single: bool, now) -> str:
@@ -75,18 +63,6 @@ def _cell_line(cell: dict, entry: dict, single: bool, now) -> str:
     return f"`{ts}` {emoji}{txt}".rstrip()
 
 
-def _legacy_body(entry: dict, st: str) -> str:
-    prompt = entry.get("prompt") or ""
-    summary = entry.get("summary") or ""
-    if st == "running":
-        return f"正在处理：{prompt}" if prompt else ""
-    if st == "waiting":
-        return prompt
-    if st == "done":
-        return summary or prompt
-    return summary  # ended / stale
-
-
 def render_content(state: dict, now=None) -> str:
     now = time.time() if now is None else now
     items = sorted(state.get("projects", {}).items(),
@@ -96,23 +72,15 @@ def render_content(state: dict, now=None) -> str:
         st = display_status(e, now)
         emoji, label = STATUS_META.get(st, STATUS_META["stale"])
         summary = e.get("summary") or ""
-        if "cells" in e:
-            cells = live_cells(e, now)
-            if len(cells) > 1:
-                label = f"{len(cells)} 个会话"
-            lines = [_cell_line(c, e, len(cells) == 1, now)
-                     for _, c in cells[:MAX_CELLS_RENDER]]
-            if not lines:  # 无活格：有摘要显示摘要（已结束），否则仅标题行
-                ts = fmt_time(e.get("updated_at", now), now=now)
-                lines = [f"`{ts}` {summary}".rstrip()] if summary else []
-            body = "  \n".join(lines)
-        else:  # legacy 扁平条目
+        cells = live_cells(e, now)
+        if len(cells) > 1:
+            label = f"{len(cells)} 个会话"
+        lines = [_cell_line(c, e, len(cells) == 1, now)
+                 for _, c in cells[:MAX_CELLS_RENDER]]
+        if not lines:  # 无活格：有摘要显示摘要（已结束），否则仅标题行
             ts = fmt_time(e.get("updated_at", now), now=now)
-            if st in ("running", "waiting"):
-                ts = f"自 {ts}"
-            body = f"`{ts}` " + _legacy_body(e, st)
-            body = body.rstrip()
-        body = truncate_utf16(body, MAX_PROJECT_UTF16)
+            lines = [f"`{ts}` {summary}".rstrip()] if summary else []
+        body = truncate_utf16("  \n".join(lines), MAX_PROJECT_UTF16)
         if st in ("running", "waiting") and summary:
             # 硬换行（行尾两空格）；渲染器不支持时降级为同行显示，仍可读
             body += ("  \n" if body else "") + "↳ 上轮：" + \
@@ -123,10 +91,8 @@ def render_content(state: dict, now=None) -> str:
 
 
 def _running_count(entry: dict, now) -> int:
-    if "cells" in entry:
-        return sum(1 for _, c in live_cells(entry, now)
-                   if c["status"] == "running")
-    return 1 if effective_status(entry, now) == "running" else 0
+    return sum(1 for _, c in live_cells(entry, now)
+               if c["status"] == "running")
 
 
 def render_summary(state: dict, now=None) -> str:

@@ -39,8 +39,8 @@ projects[proj] = {
 - SessionEnd → 删本格（无格 no-op）。v0.2.5 两个 ownership 守卫**退役**
 - 格子清理：>2h stale 不渲染；>24h 删除；注册表可读时，sid 不在活表且
   格龄 >60s 即删（读失败静默退回纯 stale；`HIBOARD_NO_REGISTRY=1` 禁用）
-- 旧扁平条目（无 cells）按 legacy 路径渲染，7 天自然淘汰；新事件写入时
-  清除该项目的 legacy 字段
+- ~~旧扁平条目按 legacy 路径渲染~~（0.4.1 用户裁定移除：无 cells 条目
+  一律按「无活格」处理——有摘要显示已结束，否则仅标题行）
 
 ### 渲染
 

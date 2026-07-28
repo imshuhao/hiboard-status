@@ -21,8 +21,10 @@ class TestStatusCli(TmpDataDirTest):
 
     def test_status_shows_projects_and_breaker(self):
         _write_config()
-        hh.update_project("demo", {"status": "running", "prompt": "改代码",
-                                   "updated_at": time.time()})
+        hh.update_project("demo", {
+            "cells": {"s1": {"status": "running", "prompt": "改代码",
+                             "updated_at": time.time()}},
+            "updated_at": time.time()})
         hh.mutate_state(lambda s: s.update(
             {"quota_blocked_until": time.time() + 3600,
              "topics": {"claude_code_topic_x": {

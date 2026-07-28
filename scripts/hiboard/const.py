@@ -1,6 +1,6 @@
 """全局常量。改动前必读 docs/hiboard-api-spec.md（字段显示映射反直觉）。"""
 
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 
 DEFAULT_ENDPOINT = ("https://hiboard-claw-drcn.ai.dbankcloud.cn"
                     "/distribution/message/cloud/claw/msg/upload")

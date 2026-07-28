@@ -62,7 +62,7 @@ def cmd_status() -> int:
                 label += f"（{len(cells)} 个会话）"
             ts = fmt_time(e.get("updated_at", now), now=now)
             snippet = ((cells[0][1].get("prompt") if cells else "")
-                       or e.get("prompt") or e.get("summary") or "")[:40]
+                       or e.get("summary") or "")[:40]
             print(f"  {emoji} {name} — {label} @ {ts}  {snippet}")
     else:
         print("项目：无记录")

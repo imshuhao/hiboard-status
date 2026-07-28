@@ -1,7 +1,7 @@
 import time
 import unittest
 
-from helpers import hh, _mkstate
+from helpers import hh
 
 
 class TestTimeAndStatus(unittest.TestCase):
@@ -9,60 +9,6 @@ class TestTimeAndStatus(unittest.TestCase):
         now = time.time()
         self.assertNotIn("-", hh.fmt_time(now, now=now))
         self.assertIn("-", hh.fmt_time(now - 2 * 86400, now=now))
-
-    def test_effective_status_stale(self):
-        now = time.time()
-        fresh = {"status": "running", "updated_at": now}
-        old = {"status": "running", "updated_at": now - 3 * 3600}
-        done_old = {"status": "done", "updated_at": now - 3 * 3600}
-        self.assertEqual(hh.effective_status(fresh, now), "running")
-        self.assertEqual(hh.effective_status(old, now), "stale")
-        self.assertEqual(hh.effective_status(done_old, now), "done")  # 非活跃态不降级
-
-
-class TestRender(unittest.TestCase):
-    def test_render_content_orders_by_updated_desc(self):
-        now = time.time()
-        state = _mkstate(
-            older={"status": "done", "summary": "旧的", "updated_at": now - 600},
-            newer={"status": "running", "prompt": "新的", "updated_at": now},
-        )
-        out = hh.render_content(state, now=now)
-        self.assertLess(out.index("newer"), out.index("older"))
-        self.assertIn("🟢 newer — 运行中", out)
-        self.assertIn("✅ older — 本轮完成", out)
-
-    def test_render_content_prefers_summary_over_prompt(self):
-        now = time.time()
-        state = _mkstate(p={"status": "done", "summary": "摘要文本",
-                            "prompt": "指令文本", "updated_at": now})
-        out = hh.render_content(state, now=now)
-        self.assertIn("摘要文本", out)
-        self.assertNotIn("指令文本", out)
-
-    def test_render_content_truncates_long_project(self):
-        now = time.time()
-        state = _mkstate(p={"status": "done", "summary": "长" * 5000,
-                            "updated_at": now})
-        out = hh.render_content(state, now=now)
-        self.assertLessEqual(hh.utf16_len(out), hh.MAX_CARD_UTF16)
-        self.assertIn("…", out)
-
-    def test_render_content_empty_state(self):
-        self.assertIn("暂无会话", hh.render_content({"projects": {}}))
-
-    def test_render_summary_counts_running_and_latest(self):
-        now = time.time()
-        state = _mkstate(
-            a={"status": "running", "updated_at": now - 10},
-            b={"status": "done", "updated_at": now},
-        )
-        s = hh.render_summary(state, now=now)
-        self.assertIn("1 个会话运行中", s)
-        self.assertIn("b", s)
-
-    def test_render_summary_empty(self):
-        self.assertEqual(hh.render_summary({"projects": {}}), "Claude Code")
 
 
 def _cells_entry(summary="", now=None, **cells):
@@ -73,7 +19,39 @@ def _cells_entry(summary="", now=None, **cells):
 
 
 class TestCellsRender(unittest.TestCase):
-    """格子模型渲染：分行、优先级、legacy 回退。"""
+    """格子模型渲染：分行、优先级、排序、截断。"""
+
+    def test_render_content_orders_projects_by_updated_desc(self):
+        now = time.time()
+        state = {"projects": {
+            "older": _cells_entry(A={"status": "done", "prompt": "x"},
+                                  summary="旧的", now=now - 600),
+            "newer": _cells_entry(B={"status": "running", "prompt": "新的"},
+                                  now=now),
+        }}
+        out = hh.render_content(state, now=now)
+        self.assertLess(out.index("newer"), out.index("older"))
+
+    def test_render_content_truncates_long_summary(self):
+        now = time.time()
+        state = {"projects": {"p": _cells_entry(
+            A={"status": "done", "prompt": "x"}, summary="长" * 5000, now=now)}}
+        out = hh.render_content(state, now=now)
+        self.assertLessEqual(hh.utf16_len(out), hh.MAX_CARD_UTF16)
+        self.assertIn("…", out)
+
+    def test_render_content_empty_state(self):
+        self.assertIn("暂无会话", hh.render_content({"projects": {}}))
+
+    def test_render_summary_empty(self):
+        self.assertEqual(hh.render_summary({"projects": {}}), "Claude Code")
+
+    def test_unknown_cell_status_treated_dead_not_crash(self):
+        now = time.time()
+        state = {"projects": {"p": _cells_entry(
+            A={"status": "weird", "prompt": "x"}, summary="留底", now=now)}}
+        self.assertIn("已结束", hh.render_content(state, now=now))
+        self.assertIn("已结束", hh.render_summary(state, now=now))
 
     def test_single_running_cell_matches_classic_format(self):
         now = time.time()
@@ -142,68 +120,21 @@ class TestCellsRender(unittest.TestCase):
         s = hh.render_summary(state, now=now)
         self.assertIn("2 个会话运行中", s)
 
-
-class TestRenderStatusBody(unittest.TestCase):
-    """legacy 扁平条目的渲染回退（升级前的旧数据仍需正确显示）。"""
-
-    def test_running_prompt_gets_prefix(self):
+    def test_done_cell_without_summary_falls_back_to_prompt(self):
         now = time.time()
-        out = hh.render_content({"projects": {"p": {
-            "status": "running", "prompt": "跑测试", "updated_at": now}}}, now=now)
-        self.assertIn("正在处理：跑测试", out)
-
-    def test_running_timestamp_shows_since(self):
-        # 运行时长感：running/waiting 时间戳带「自」前缀，done 不带
-        now = time.time()
-        out = hh.render_content({"projects": {
-            "a": {"status": "running", "prompt": "x", "updated_at": now},
-            "b": {"status": "done", "summary": "y", "updated_at": now},
-        }}, now=now)
-        self.assertEqual(out.count("`自 "), 1)
-
-    def test_ended_hides_prompt(self):
-        now = time.time()
-        out = hh.render_content({"projects": {"p": {
-            "status": "ended", "prompt": "跑测试", "updated_at": now}}}, now=now)
-        self.assertNotIn("跑测试", out)
-        self.assertIn("已结束", out)
-
-    def test_done_falls_back_to_prompt_when_no_summary(self):
-        now = time.time()
-        out = hh.render_content({"projects": {"p": {
-            "status": "done", "prompt": "跑测试", "updated_at": now}}}, now=now)
+        state = {"projects": {"p": _cells_entry(
+            A={"status": "done", "prompt": "跑测试"}, now=now)}}
+        out = hh.render_content(state, now=now)
         self.assertIn("跑测试", out)
         self.assertNotIn("正在处理", out)
 
-    def test_running_shows_last_summary_line(self):
+    def test_waiting_cell_shows_last_summary_line(self):
         now = time.time()
-        out = hh.render_content({"projects": {"p": {
-            "status": "running", "prompt": "修复登录", "summary": "重构了 token 逻辑",
-            "updated_at": now}}}, now=now)
-        self.assertIn("正在处理：修复登录", out)
-        self.assertIn("↳ 上轮：重构了 token 逻辑", out)
+        state = {"projects": {"p": _cells_entry(
+            A={"status": "waiting", "prompt": "要继续吗"},
+            summary="跑完了测试", now=now)}}
+        self.assertIn("↳ 上轮：跑完了测试", hh.render_content(state, now=now))
 
-    def test_waiting_shows_last_summary_line(self):
-        now = time.time()
-        out = hh.render_content({"projects": {"p": {
-            "status": "waiting", "prompt": "要继续吗", "summary": "跑完了测试",
-            "updated_at": now}}}, now=now)
-        self.assertIn("↳ 上轮：跑完了测试", out)
-
-    def test_done_has_no_last_summary_line(self):
-        # done 状态摘要即正文，不重复渲染「上轮」行
-        now = time.time()
-        out = hh.render_content({"projects": {"p": {
-            "status": "done", "summary": "完成了重构", "updated_at": now}}}, now=now)
-        self.assertIn("完成了重构", out)
-        self.assertNotIn("上轮", out)
-
-    def test_unknown_status_renders_as_stale_not_crash(self):
-        # 手改 state.json 或版本回退可能出现未知状态值，渲染须兜底
-        now = time.time()
-        state = {"projects": {"p": {"status": "weird", "updated_at": now}}}
-        self.assertIn("状态未知", hh.render_content(state, now=now))
-        self.assertIn("状态未知", hh.render_summary(state, now=now))
 
 
 if __name__ == "__main__":

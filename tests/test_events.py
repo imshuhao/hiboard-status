@@ -138,18 +138,6 @@ class TestDispatch(TmpDataDirTest):
         e = self._state()["projects"]["myproj"]
         self.assertEqual(e["summary"], hh.SUMMARY_PLACEHOLDER)
 
-    def test_legacy_flat_fields_cleared_on_first_cell(self):
-        _write_config()
-        hh.update_project("myproj", {"status": "ended", "prompt": "旧的",
-                                     "session_id": "olds",
-                                     "updated_at": time.time()})
-        _run_hook({"hook_event_name": "UserPromptSubmit", "session_id": "s1",
-                   "cwd": "/tmp/myproj", "prompt": "新的"})
-        e = self._state()["projects"]["myproj"]
-        self.assertNotIn("status", e)
-        self.assertNotIn("prompt", e)
-        self.assertIn("s1", e["cells"])
-
     def test_garbage_stdin_exits_zero(self):
         env = os.environ.copy()
         r = subprocess.run([sys.executable, str(ENTRY)],

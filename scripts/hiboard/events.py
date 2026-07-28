@@ -103,14 +103,6 @@ def prune_cells(entry: dict, now: float, live) -> None:
             del cells[sid]
 
 
-def _cells_of(entry: dict) -> dict:
-    """取格子表；首次进入格子模型时清除 legacy 扁平字段。"""
-    if "cells" not in entry:
-        for k in ("status", "prompt", "session_id"):
-            entry.pop(k, None)
-    return entry.setdefault("cells", {})
-
-
 def spawn_summarizer(evt: dict, proj: str, turn_ts: float,
                      user_prompt: str = "") -> None:
     if os.environ.get("HIBOARD_NO_SUMMARY"):
@@ -173,7 +165,7 @@ def handle_event(evt: dict) -> None:
                 result["skip"] = True
                 return  # 没有格子的会话不值得为这两类事件建条目
             entry = state["projects"][proj] = {}
-        cells = _cells_of(entry)
+        cells = entry.setdefault("cells", {})
         prune_cells(entry, now, live)
 
         if name == "UserPromptSubmit":
